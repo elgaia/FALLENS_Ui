@@ -6,6 +6,7 @@ local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
 local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
 local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
 local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+local DashboardManager = loadstring(game:HttpGet(repo .. "addons/DashboardManager.lua"))()
 
 local Options = Library.Options
 local Toggles = Library.Toggles
@@ -18,6 +19,7 @@ local Window = Library:CreateWindow({
 	-- Set AutoShow to true if you want the menu to appear when it is created
 	-- Set Resizable to true if you want to have in-game resizable Window
 	-- Set MobileButtonsSide to "Left" or "Right" if you want the ui toggle & lock buttons to be on the left or right side of the window
+	-- Set ShowMobileButtons to false if you don't want the floating toggle & lock buttons on mobile
 	-- Set ShowCustomCursor to false if you don't want to use the Linoria cursor
 	-- Set AlwaysOnTop to true if you want the menu to render above Roblox core blur (executor only)
 	-- NotifySide = Changes the side of the notifications (Left, Right) (Default value = Left)
@@ -26,7 +28,7 @@ local Window = Library:CreateWindow({
 
 	Title = "mspaint",
 	Footer = "version: example",
-	Icon = 95816097006870,
+	Icon = 95816097006870, -- This icon is also used by the round mobile toggle button
 	NotifySide = "Right",
 	ShowCustomCursor = true,
 })
@@ -44,6 +46,46 @@ local Tabs = {
 	Key = Window:AddKeyTab("Key System"),
 	["UI Settings"] = Window:AddTab("UI Settings", "settings"),
 }
+
+-- DashboardManager (modern dashboard tab, similar to modern UI home tabs):
+-- profile card with avatar & greeting, server / discord / executor / friends
+-- cards with live stats and custom segment pages (Script, UI, Changelog, ...).
+DashboardManager:SetLibrary(Library)
+
+local DashboardTab, Dashboard = DashboardManager:CreateDashboardTab(Window, {
+	Name = "Dashboard",
+	Icon = "layout-dashboard",
+	Order = nil, -- set to a number to control where the tab appears (1 = first)
+
+	-- DiscordInvite accepts a plain invite code, a full discord.gg link or a markdown link
+	DiscordInvite = "discord.gg/yourinvite",
+
+	SupportedExecutors = { "Synapse Z", "Wave", "Swift" },
+	UnsupportedExecutors = {},
+
+	Segments = {
+		Script = {
+			Text = "Script",
+			Icon = "file-text",
+			Description = {
+				Title = "Example Script",
+				Date = "28.10.2026",
+				Content = "This description panel accepts <b>rich text</b> and multiple lines.\nPut your script info, credits or usage notes here.",
+			},
+		},
+		Changelog = {
+			Text = "Changelog",
+			Icon = "list-checks",
+			Description = {
+				{ Title = "v1.1", Date = "28.10.2026", Content = "Added the DashboardManager addon." },
+				{ Title = "v1.0", Date = "27.10.2026", Content = "Initial release." },
+			},
+		},
+	},
+})
+
+-- Dashboard:SelectPage("Changelog") -- you can programmatically switch segment pages
+-- Dashboard:Destroy() -- removes the dashboard and gives the tab back to groupboxes
 
 
 --[[
