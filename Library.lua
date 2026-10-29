@@ -439,9 +439,13 @@ local Templates = {
             Gap = 0,
             Padding = 0,
             CornerRadius = 0,
-            Indicator = false,
-            IndicatorWidth = 2,
-            IndicatorHeight = 20,
+            Indicator = true,
+            IndicatorOffset = 2,
+            IndicatorWidth = 3,
+            IndicatorHeight = 22,
+            HighlightInsetX = 6,
+            HighlightInsetY = 5,
+            HighlightCornerRadius = 6,
         },
     },
     Groupbox = {
@@ -12550,6 +12554,7 @@ function Library:CreateWindow(WindowInfo)
         end
 
         local TabButton: TextButton
+        local TabHighlight: Frame
         local TabIndicator
         local TabLabel
         local TabIcon
@@ -12559,27 +12564,41 @@ function Library:CreateWindow(WindowInfo)
         local TabRight
 
         Icon = Library:GetCustomIcon(Icon)
+        local HighlightInsetX = TabButtonsStyle.HighlightInsetX or 6
+        local HighlightInsetY = TabButtonsStyle.HighlightInsetY or 5
+        local HighlightCornerRadius = TabButtonsStyle.HighlightCornerRadius or 6
+        local IndicatorOffset = TabButtonsStyle.IndicatorOffset or 2
         do
             TabButton = New("TextButton", {
-                BackgroundColor3 = "MainColor",
                 BackgroundTransparency = 1,
                 Size = UDim2.new(1, 0, 0, 40),
                 Text = "",
+                AutoButtonColor = false,
                 LayoutOrder = Order,
                 Parent = Tabs,
             })
-            New("UICorner", {
-                CornerRadius = UDim.new(0, TabButtonsStyle.CornerRadius),
+
+            --// Selection highlight: smaller rounded block inset inside the tab button \--
+            TabHighlight = New("Frame", {
+                BackgroundColor3 = "MainColor",
+                BackgroundTransparency = 1,
+                Position = UDim2.fromOffset(HighlightInsetX, HighlightInsetY),
+                Size = UDim2.new(1, -HighlightInsetX * 2, 1, -HighlightInsetY * 2),
                 Parent = TabButton,
             })
+            New("UICorner", {
+                CornerRadius = UDim.new(0, HighlightCornerRadius),
+                Parent = TabHighlight,
+            })
 
+            --// Accent line indicator beside the sidebar icon \--
             if TabButtonsStyle.Indicator then
                 TabIndicator = New("Frame", {
-                    AnchorPoint = Vector2.new(1, 0.5),
+                    AnchorPoint = Vector2.new(0, 0.5),
                     BackgroundColor3 = "AccentColor",
                     BackgroundTransparency = 1,
-                    Position = UDim2.new(0, -2, 0.5, 0),
-                    Size = UDim2.fromOffset(TabButtonsStyle.IndicatorWidth, TabButtonsStyle.IndicatorHeight),
+                    Position = UDim2.new(0, IndicatorOffset, 0.5, 0),
+                    Size = UDim2.fromOffset(TabButtonsStyle.IndicatorWidth or 3, TabButtonsStyle.IndicatorHeight or 22),
                     Parent = TabButton,
                 })
 
@@ -13789,7 +13808,7 @@ function Library:CreateWindow(WindowInfo)
                 Library.ActiveTab:Hide()
             end
 
-            TweenService:Create(TabButton, Library.TweenInfo, {
+            TweenService:Create(TabHighlight, Library.TweenInfo, {
                 BackgroundTransparency = 0,
             }):Play()
             if TabIndicator then
@@ -13819,7 +13838,7 @@ function Library:CreateWindow(WindowInfo)
         end
 
         function Tab:Hide()
-            TweenService:Create(TabButton, Library.TweenInfo, {
+            TweenService:Create(TabHighlight, Library.TweenInfo, {
                 BackgroundTransparency = 1,
             }):Play()
 
@@ -13972,6 +13991,7 @@ function Library:CreateWindow(WindowInfo)
         Icon = Icon or "key"
 
         local TabButton: TextButton
+        local TabHighlight: Frame
         local TabIndicator
         local TabLabel
         local TabIcon
@@ -13979,27 +13999,41 @@ function Library:CreateWindow(WindowInfo)
         local TabContainer
 
         Icon = if Icon == "key" then KeyIcon else Library:GetCustomIcon(Icon)
+        local HighlightInsetX = TabButtonsStyle.HighlightInsetX or 6
+        local HighlightInsetY = TabButtonsStyle.HighlightInsetY or 5
+        local HighlightCornerRadius = TabButtonsStyle.HighlightCornerRadius or 6
+        local IndicatorOffset = TabButtonsStyle.IndicatorOffset or 2
         do
             TabButton = New("TextButton", {
-                BackgroundColor3 = "MainColor",
                 BackgroundTransparency = 1,
                 Size = UDim2.new(1, 0, 0, 40),
                 Text = "",
+                AutoButtonColor = false,
                 LayoutOrder = Order,
                 Parent = Tabs,
             })
-            New("UICorner", {
-                CornerRadius = UDim.new(0, TabButtonsStyle.CornerRadius),
+
+            --// Selection highlight: smaller rounded block inset inside the tab button \--
+            TabHighlight = New("Frame", {
+                BackgroundColor3 = "MainColor",
+                BackgroundTransparency = 1,
+                Position = UDim2.fromOffset(HighlightInsetX, HighlightInsetY),
+                Size = UDim2.new(1, -HighlightInsetX * 2, 1, -HighlightInsetY * 2),
                 Parent = TabButton,
             })
+            New("UICorner", {
+                CornerRadius = UDim.new(0, HighlightCornerRadius),
+                Parent = TabHighlight,
+            })
 
+            --// Accent line indicator beside the sidebar icon \--
             if TabButtonsStyle.Indicator then
                 TabIndicator = New("Frame", {
-                    AnchorPoint = Vector2.new(1, 0.5),
+                    AnchorPoint = Vector2.new(0, 0.5),
                     BackgroundColor3 = "AccentColor",
                     BackgroundTransparency = 1,
-                    Position = UDim2.new(0, -2, 0.5, 0),
-                    Size = UDim2.fromOffset(TabButtonsStyle.IndicatorWidth, TabButtonsStyle.IndicatorHeight),
+                    Position = UDim2.new(0, IndicatorOffset, 0.5, 0),
+                    Size = UDim2.fromOffset(TabButtonsStyle.IndicatorWidth or 3, TabButtonsStyle.IndicatorHeight or 22),
                     Parent = TabButton,
                 })
 
@@ -14234,7 +14268,7 @@ function Library:CreateWindow(WindowInfo)
                 Library.ActiveTab:Hide()
             end
 
-            TweenService:Create(TabButton, Library.TweenInfo, {
+            TweenService:Create(TabHighlight, Library.TweenInfo, {
                 BackgroundTransparency = 0,
             }):Play()
 
@@ -14268,7 +14302,7 @@ function Library:CreateWindow(WindowInfo)
         end
 
         function Tab:Hide()
-            TweenService:Create(TabButton, Library.TweenInfo, {
+            TweenService:Create(TabHighlight, Library.TweenInfo, {
                 BackgroundTransparency = 1,
             }):Play()
 
@@ -14365,6 +14399,7 @@ function Library:CreateWindow(WindowInfo)
         end
 
         local TabButton: TextButton
+        local TabHighlight: Frame
         local TabIndicator
         local TabLabel
         local TabIcon
@@ -14372,27 +14407,41 @@ function Library:CreateWindow(WindowInfo)
         local TabContainer
 
         Icon = Library:GetCustomIcon(Icon)
+        local HighlightInsetX = TabButtonsStyle.HighlightInsetX or 6
+        local HighlightInsetY = TabButtonsStyle.HighlightInsetY or 5
+        local HighlightCornerRadius = TabButtonsStyle.HighlightCornerRadius or 6
+        local IndicatorOffset = TabButtonsStyle.IndicatorOffset or 2
         do
             TabButton = New("TextButton", {
-                BackgroundColor3 = "MainColor",
                 BackgroundTransparency = 1,
                 Size = UDim2.new(1, 0, 0, 40),
                 Text = "",
+                AutoButtonColor = false,
                 LayoutOrder = Order,
                 Parent = Tabs,
             })
-            New("UICorner", {
-                CornerRadius = UDim.new(0, TabButtonsStyle.CornerRadius),
+
+            --// Selection highlight: smaller rounded block inset inside the tab button \--
+            TabHighlight = New("Frame", {
+                BackgroundColor3 = "MainColor",
+                BackgroundTransparency = 1,
+                Position = UDim2.fromOffset(HighlightInsetX, HighlightInsetY),
+                Size = UDim2.new(1, -HighlightInsetX * 2, 1, -HighlightInsetY * 2),
                 Parent = TabButton,
             })
+            New("UICorner", {
+                CornerRadius = UDim.new(0, HighlightCornerRadius),
+                Parent = TabHighlight,
+            })
 
+            --// Accent line indicator beside the sidebar icon \--
             if TabButtonsStyle.Indicator then
                 TabIndicator = New("Frame", {
-                    AnchorPoint = Vector2.new(1, 0.5),
+                    AnchorPoint = Vector2.new(0, 0.5),
                     BackgroundColor3 = "AccentColor",
                     BackgroundTransparency = 1,
-                    Position = UDim2.new(0, -2, 0.5, 0),
-                    Size = UDim2.fromOffset(TabButtonsStyle.IndicatorWidth, TabButtonsStyle.IndicatorHeight),
+                    Position = UDim2.new(0, IndicatorOffset, 0.5, 0),
+                    Size = UDim2.fromOffset(TabButtonsStyle.IndicatorWidth or 3, TabButtonsStyle.IndicatorHeight or 22),
                     Parent = TabButton,
                 })
 
@@ -14501,7 +14550,7 @@ function Library:CreateWindow(WindowInfo)
                 Library.ActiveTab:Hide()
             end
 
-            TweenService:Create(TabButton, Library.TweenInfo, {
+            TweenService:Create(TabHighlight, Library.TweenInfo, {
                 BackgroundTransparency = 0,
             }):Play()
 
@@ -14533,7 +14582,7 @@ function Library:CreateWindow(WindowInfo)
         end
 
         function Tab:Hide()
-            TweenService:Create(TabButton, Library.TweenInfo, {
+            TweenService:Create(TabHighlight, Library.TweenInfo, {
                 BackgroundTransparency = 1,
             }):Play()
 
