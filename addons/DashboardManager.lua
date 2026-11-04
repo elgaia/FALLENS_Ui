@@ -8,10 +8,18 @@ local RunService: RunService = cloneref(game:GetService("RunService"))
 local TweenService: TweenService = cloneref(game:GetService("TweenService"))
 local LocalizationService: LocalizationService = cloneref(game:GetService("LocalizationService"))
 local MarketplaceService: MarketplaceService = cloneref(game:GetService("MarketplaceService"))
+local UserInputService: UserInputService = cloneref(game:GetService("UserInputService"))
+local SoundService: SoundService = cloneref(game:GetService("SoundService"))
+local ContentProvider: ContentProvider = cloneref(game:GetService("ContentProvider"))
 
 local LocalPlayer: Player = Players.LocalPlayer
 
 --// DashboardManager \\--
+--// Adds a modern dashboard tab similar to modern UI dashboards: profile card (avatar +
+--// greeting), segment bar, server / discord / executor / friends cards with live stats and
+--// custom segment pages (changelog, script info, ...), plus a built-in music player segment
+--// styled like the details & info page: play / pause / stop, prev / next, seek bar, volume
+--// & speed sliders, playlist with asset ids and local .mp3 files, loop & shuffle modes.
 local DashboardManager = {
     Library = nil,
     Dashboard = nil,
@@ -85,6 +93,12 @@ local Defaults = {
     DetailsText = "Details And Info",
     DetailsIcon = "layout-grid",
     ShowDetailsSegment = true,
+
+    ShowMusicSegment = true,
+    MusicText = "Music Player",
+    MusicIcon = "music",
+    MusicVolume = 50,
+    MusicSpeed = 1,
 
     DiscordInvite = "",
     SupportedExecutors = {},
@@ -202,6 +216,27 @@ local function SetIconColorScheme(Library, Icon: GuiObject, SchemeName: string)
     Target[Property] = Library.Scheme[SchemeName]
     if Library.Registry[Icon] then
         Library.Registry[Icon][Property] = SchemeName
+    end
+end
+
+--// Swaps a lib icon in place and keeps the theme registry in sync (play / pause button)
+local function SwapIcon(Library, Icon: GuiObject, IconName: string, SchemeName: string): GuiObject
+    local NewIcon = Library:GetCustomIcon(IconName)
+    if NewIcon then
+        Icon = Library:ApplyIcon(Icon, NewIcon)
+    end
+
+    SetIconColorScheme(Library, Icon, SchemeName)
+    return Icon
+end
+
+--// Recolors a text label and keeps the theme registry in sync
+local function SetLabelScheme(Library, Label: any, SchemeName: string)
+    if Label and Label.Parent then
+        Label.TextColor3 = Library.Scheme[SchemeName]
+        if Library.Registry[Label] then
+            Library.Registry[Label].TextColor3 = SchemeName
+        end
     end
 end
 
@@ -344,6 +379,1251 @@ local function FillDescription(Library, Page: GuiObject, Description: any, Empty
             Desc.LayoutOrder = 2
         end
     end
+end
+
+--// Music player segment (cards styled like the details & info page) \\--
+local function FormatMusicTime(Seconds: number): string
+    Seconds = math.max(0, math.floor((tonumber(Seconds) or 0) + 0.5))
+    return string.format("%d:%02d", math.floor(Seconds / 60), Seconds % 60)
+end
+
+local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: any })
+    local Mouse = LocalPlayer:GetMouse()
+    local CardGap = tonumber(Options.CardGap) or 10
+    local Compact = Library.IsMobile == true
+
+    --// Playback state \\--
+    local Playlist: { { [string]: any } } = {}
+    local CurrentIndex = 0
+    local PlaybackState = "Stopped" --// Stopped | Playing | Paused
+    local LoopPlaylist = false
+    local Shuffle = false
+    local SwitchingSongs = false
+    local LastAdvanceAt = 0
+    local ConsecutiveFailures = 0
+    local Volume = math.floor(math.clamp(tonumber(Options.Volume) or 50, 0, 100) + 0.5)
+    local Speed = math.clamp(tonumber(Options.Speed) or 1, 0.25, 3)
+    local Connections: { RBXScriptConnection } = {}
+    local Draggers: { { [string]: any } } = {}
+
+    local function Notify(Title: string, Description: string)
+        if Library.Notify then
+            Library:Notify({ Title = Title, Description = Description, Time = 3 })
+        end
+    end
+
+    local Sound = Instance.new("Sound")
+    Sound.Name = "FALLENS_DashboardMusic"
+    Sound.Volume = Volume / 100
+    Sound.PlaybackSpeed = Speed
+    Sound.Parent = SoundService
+
+    --// Forward declarations, the player functions reference each other \\--
+    local PlayIndex, RefreshPlaylist, RemoveSong, TogglePlay, StopSong, NextSong, PrevSong, AutoAdvance
+    local UpdateNowPlaying
+
+    --// Shared drag plumbing for the seek / volume / speed bars \\--
+    local function AddDragger(Dragger: { [string]: any }): { [string]: any }
+        Dragger.Dragging = false
+        table.insert(Draggers, Dragger)
+        return Dragger
+    end
+
+    local function BeginDrag(Dragger: { [string]: any })
+        Dragger.Dragging = true
+        if Options.SetScrolling then
+            Options.SetScrolling(false)
+        end
+        Dragger.UpdateFromMouse()
+    end
+
+    table.insert(Connections, UserInputService.InputChanged:Connect(function(Input)
+        if Input.UserInputType == Enum.UserInputType.MouseMovement or Input.UserInputType == Enum.UserInputType.Touch then
+            for _, Dragger in Draggers do
+                if Dragger.Dragging then
+                    Dragger.UpdateFromMouse()
+                end
+            end
+        end
+    end))
+
+    table.insert(Connections, UserInputService.InputEnded:Connect(function(Input)
+        if Input.UserInputType == Enum.UserInputType.MouseButton1 or Input.UserInputType == Enum.UserInputType.Touch then
+            local WasDragging = false
+
+            for _, Dragger in Draggers do
+                if Dragger.Dragging then
+                    Dragger.Dragging = false
+                    WasDragging = true
+                    if Dragger.OnRelease then
+                        Dragger.OnRelease()
+                    end
+                end
+            end
+
+            if WasDragging and Options.SetScrolling then
+                Options.SetScrolling(true)
+            end
+        end
+    end))
+
+    --// Columns, same split as the details page \\--
+    local LeftColumn = Instance.new("Frame")
+    LeftColumn.BackgroundTransparency = 1
+    LeftColumn.BorderSizePixel = 0
+    LeftColumn.Size = UDim2.new(0.52, -4, 1, 0)
+    LeftColumn.Parent = Page
+
+    local LeftColumnLayout = Instance.new("UIListLayout")
+    LeftColumnLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    LeftColumnLayout.Padding = UDim.new(0, CardGap)
+    LeftColumnLayout.Parent = LeftColumn
+
+    local RightColumn = Instance.new("Frame")
+    RightColumn.BackgroundTransparency = 1
+    RightColumn.BorderSizePixel = 0
+    RightColumn.Position = UDim2.new(0.52, 4, 0, 0)
+    RightColumn.Size = UDim2.new(0.48, -4, 1, 0)
+    RightColumn.Parent = Page
+
+    local RightColumnLayout = Instance.new("UIListLayout")
+    RightColumnLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    RightColumnLayout.Padding = UDim.new(0, CardGap)
+    RightColumnLayout.Parent = RightColumn
+
+    --// Transport button (prev / play / stop / next) \\--
+    local function MakeControlButton(Parent: GuiObject, Width: number, IconName: string, Accent: boolean?)
+        local Button = Instance.new("TextButton")
+        Button.BackgroundColor3 = Accent and Library.Scheme.AccentColor or Library.Scheme.BackgroundColor
+        Button.BackgroundTransparency = Accent and 0.1 or 0.25
+        Button.BorderSizePixel = 0
+        Button.AutoButtonColor = false
+        Button.Text = ""
+        Button.Size = UDim2.fromOffset(Width, 36)
+        Button.ClipsDescendants = true
+        Button.Parent = Parent
+
+        Library:AddToRegistry(Button, { BackgroundColor3 = Accent and "AccentColor" or "BackgroundColor" })
+        MakeCorner(Library, Button, Library.CornerRadius, true)
+        MakeStroke(Library, Button)
+
+        local Icon = MakeIcon(Library, Button, IconName, 16, Accent and "WhiteColor" or "FontColor")
+        Icon.AnchorPoint = Vector2.new(0.5, 0.5)
+        Icon.Position = UDim2.fromScale(0.5, 0.5)
+
+        Button.MouseEnter:Connect(function()
+            TweenService:Create(Button, Library.TweenInfo, { BackgroundTransparency = Accent and 0 or 0.1 }):Play()
+        end)
+        Button.MouseLeave:Connect(function()
+            TweenService:Create(Button, Library.TweenInfo, { BackgroundTransparency = Accent and 0.1 or 0.25 }):Play()
+        end)
+
+        return Button, Icon
+    end
+
+    --// Loop / shuffle mode toggle \\--
+    local function MakeModeToggle(Parent: GuiObject, Width: number, IconName: string, Text: string)
+        local Button = Instance.new("TextButton")
+        Button.BackgroundColor3 = Library.Scheme.BackgroundColor
+        Button.BackgroundTransparency = 0.25
+        Button.BorderSizePixel = 0
+        Button.AutoButtonColor = false
+        Button.Text = ""
+        Button.Size = UDim2.fromOffset(Width, 26)
+        Button.ClipsDescendants = true
+        Button.Parent = Parent
+
+        Library:AddToRegistry(Button, { BackgroundColor3 = "BackgroundColor" })
+        MakeCorner(Library, Button, Library.CornerRadius, true)
+        MakeStroke(Library, Button)
+
+        local Inner = Instance.new("Frame")
+        Inner.AnchorPoint = Vector2.new(0.5, 0.5)
+        Inner.BackgroundTransparency = 1
+        Inner.BorderSizePixel = 0
+        Inner.Position = UDim2.fromScale(0.5, 0.5)
+        Inner.Size = UDim2.new(1, -8, 1, 0)
+        Inner.Parent = Button
+
+        local InnerLayout = Instance.new("UIListLayout")
+        InnerLayout.FillDirection = Enum.FillDirection.Horizontal
+        InnerLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+        InnerLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+        InnerLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        InnerLayout.Padding = UDim.new(0, 6)
+        InnerLayout.Parent = Inner
+
+        local Icon = MakeIcon(Library, Button, IconName, 13, "FontColor")
+        Icon.Parent = Inner
+        Icon.LayoutOrder = 1
+
+        local Label = MakeText(Library, Button, Text, 10, true, 0.25)
+        Label.Parent = Inner
+        Label.LayoutOrder = 2
+        Label.TextXAlignment = Enum.TextXAlignment.Left
+
+        local State = { On = false }
+
+        Button.MouseEnter:Connect(function()
+            TweenService:Create(Button, Library.TweenInfo, { BackgroundTransparency = State.On and 0 or 0.15 }):Play()
+        end)
+        Button.MouseLeave:Connect(function()
+            TweenService:Create(Button, Library.TweenInfo, { BackgroundTransparency = State.On and 0.1 or 0.25 }):Play()
+        end)
+
+        return Button, Icon, Label, State
+    end
+
+    local function SetModeVisual(Button: any, Icon: any, Label: any, State: { [string]: any }, IsOn: boolean)
+        State.On = IsOn
+        Button.BackgroundColor3 = IsOn and Library.Scheme.AccentColor or Library.Scheme.BackgroundColor
+        Button.BackgroundTransparency = IsOn and 0.1 or 0.25
+
+        if Library.Registry[Button] then
+            Library.Registry[Button].BackgroundColor3 = IsOn and "AccentColor" or "BackgroundColor"
+        end
+
+        SetIconColorScheme(Library, Icon, IsOn and "WhiteColor" or "FontColor")
+        SetLabelScheme(Library, Label, IsOn and "WhiteColor" or "FontColor")
+        Label.TextTransparency = IsOn and 0 or 0.25
+    end
+
+    --// Generic slider bar (volume / speed) \\--
+    local function MakeMusicSlider(
+        Parent: GuiObject,
+        Y: number,
+        Min: number,
+        Max: number,
+        Step: number,
+        Initial: number,
+        OnChanged: (number) -> ()
+    )
+        local Bar = Instance.new("TextButton")
+        Bar.BackgroundColor3 = Library.Scheme.BackgroundColor
+        Bar.BackgroundTransparency = 0.2
+        Bar.BorderSizePixel = 0
+        Bar.AutoButtonColor = false
+        Bar.Text = ""
+        Bar.Size = UDim2.new(1, -28, 0, 12)
+        Bar.Position = UDim2.fromOffset(14, Y)
+        Bar.Parent = Parent
+
+        Library:AddToRegistry(Bar, { BackgroundColor3 = "BackgroundColor" })
+        MakeCorner(Library, Bar, 4)
+        MakeStroke(Library, Bar)
+
+        local Fill = Instance.new("Frame")
+        Fill.BackgroundColor3 = Library.Scheme.AccentColor
+        Fill.BorderSizePixel = 0
+        Fill.Size = UDim2.fromScale(math.clamp((Initial - Min) / (Max - Min), 0, 1), 1)
+        Fill.Parent = Bar
+
+        Library:AddToRegistry(Fill, { BackgroundColor3 = "AccentColor" })
+        MakeCorner(Library, Fill, 4)
+
+        local Value = Initial
+
+        local function Snap(Raw: number): number
+            Raw = Min + math.floor((Raw - Min) / Step + 0.5) * Step
+            Raw = math.clamp(Raw, Min, Max)
+            return tonumber(string.format("%.2f", Raw)) or Raw
+        end
+
+        local Dragger = AddDragger({
+            UpdateFromMouse = function()
+                local Relative = math.clamp((Mouse.X - Bar.AbsolutePosition.X) / math.max(Bar.AbsoluteSize.X, 1), 0, 1)
+                Value = Snap(Min + (Max - Min) * Relative)
+                Fill.Size = UDim2.fromScale((Value - Min) / (Max - Min), 1)
+                OnChanged(Value)
+            end,
+        })
+
+        Bar.InputBegan:Connect(function(Input)
+            if Input.UserInputType == Enum.UserInputType.MouseButton1 or Input.UserInputType == Enum.UserInputType.Touch then
+                BeginDrag(Dragger)
+            end
+        end)
+
+        return {
+            SetValue = function(Raw: number)
+                Value = Snap(Raw)
+                Fill.Size = UDim2.fromScale((Value - Min) / (Max - Min), 1)
+                OnChanged(Value)
+            end,
+        }
+    end
+
+    --// Text input box (song name / asset id or file name) \\--
+    local function MakeInputBox(Parent: GuiObject, Y: number, Placeholder: string): TextBox
+        local Box = Instance.new("TextBox")
+        Box.BackgroundColor3 = Library.Scheme.BackgroundColor
+        Box.BackgroundTransparency = 0.2
+        Box.BorderSizePixel = 0
+        Box.Size = UDim2.new(1, -28, 0, 24)
+        Box.Position = UDim2.fromOffset(14, Y)
+        Box.Text = ""
+        Box.PlaceholderText = Placeholder
+        Box.TextSize = 11
+        Box.TextXAlignment = Enum.TextXAlignment.Left
+        Box.ClearTextOnFocus = false
+        Box.ClipsDescendants = true
+        Box.Parent = Parent
+
+        Library:AddToRegistry(Box, { TextColor3 = "FontColor", FontFace = "Font" })
+        Box.TextColor3 = Library.Scheme.FontColor
+        Box.FontFace = Library.Scheme.Font
+        MakeCorner(Library, Box, 4)
+
+        local Stroke = MakeStroke(Library, Box)
+
+        local Padding = Instance.new("UIPadding")
+        Padding.PaddingLeft = UDim.new(0, 8)
+        Padding.PaddingRight = UDim.new(0, 8)
+        Padding.Parent = Box
+
+        Box.Focused:Connect(function()
+            Stroke.Color = Library.Scheme.AccentColor
+            if Library.Registry[Stroke] then
+                Library.Registry[Stroke].Color = "AccentColor"
+            end
+        end)
+        Box.FocusLost:Connect(function()
+            Stroke.Color = Library.Scheme.OutlineColor
+            if Library.Registry[Stroke] then
+                Library.Registry[Stroke].Color = "OutlineColor"
+            end
+        end)
+
+        return Box
+    end
+
+    --// Add music button (asset id / mp3 file) \\--
+    local function MakeAddButton(Parent: GuiObject, IconName: string, Text: string): TextButton
+        local Button = Instance.new("TextButton")
+        Button.BackgroundColor3 = Library.Scheme.BackgroundColor
+        Button.BackgroundTransparency = 0.25
+        Button.BorderSizePixel = 0
+        Button.AutoButtonColor = false
+        Button.Text = ""
+        Button.Size = UDim2.new(0.5, -4, 1, 0)
+        Button.ClipsDescendants = true
+        Button.Parent = Parent
+
+        Library:AddToRegistry(Button, { BackgroundColor3 = "BackgroundColor" })
+        MakeCorner(Library, Button, Library.CornerRadius, true)
+        MakeStroke(Library, Button)
+
+        local Inner = Instance.new("Frame")
+        Inner.AnchorPoint = Vector2.new(0.5, 0.5)
+        Inner.BackgroundTransparency = 1
+        Inner.BorderSizePixel = 0
+        Inner.Position = UDim2.fromScale(0.5, 0.5)
+        Inner.Size = UDim2.new(1, -6, 1, 0)
+        Inner.Parent = Button
+
+        local InnerLayout = Instance.new("UIListLayout")
+        InnerLayout.FillDirection = Enum.FillDirection.Horizontal
+        InnerLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+        InnerLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+        InnerLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        InnerLayout.Padding = UDim.new(0, 6)
+        InnerLayout.Parent = Inner
+
+        local Icon = MakeIcon(Library, Button, IconName, 13, "FontColor")
+        Icon.Parent = Inner
+        Icon.LayoutOrder = 1
+
+        local Label = MakeText(Library, Button, Text, 10, true, 0.25)
+        Label.Parent = Inner
+        Label.LayoutOrder = 2
+        Label.TextXAlignment = Enum.TextXAlignment.Left
+
+        Button.MouseEnter:Connect(function()
+            TweenService:Create(Button, Library.TweenInfo, { BackgroundTransparency = 0.1 }):Play()
+        end)
+        Button.MouseLeave:Connect(function()
+            TweenService:Create(Button, Library.TweenInfo, { BackgroundTransparency = 0.25 }):Play()
+        end)
+
+        return Button
+    end
+
+    --// Now playing card (left column) \\--
+    local NowPlayingCard = MakePanel(Library, LeftColumn, UDim2.new(1, 0, 0, 178))
+    NowPlayingCard.LayoutOrder = 1
+
+    local NowPlayingTitle = MakeText(Library, NowPlayingCard, "Now Playing", 15, true, 0)
+    NowPlayingTitle.Position = UDim2.fromOffset(14, 12)
+    NowPlayingTitle.Size = UDim2.new(1, -96, 0, 18)
+
+    local StatusLabel = MakeText(Library, NowPlayingCard, "Stopped", 10, false, 0.45)
+    StatusLabel.AnchorPoint = Vector2.new(1, 0)
+    StatusLabel.Position = UDim2.new(1, -14, 0, 15)
+    StatusLabel.Size = UDim2.fromOffset(76, 14)
+    StatusLabel.TextXAlignment = Enum.TextXAlignment.Right
+
+    local SongLabel = MakeText(Library, NowPlayingCard, "Nothing playing", 13, true, 0.05)
+    SongLabel.Position = UDim2.fromOffset(14, 34)
+    SongLabel.Size = UDim2.new(1, -28, 0, 17)
+
+    local SongDetail = MakeText(Library, NowPlayingCard, "Add songs from the playlist card", 10, false, 0.45)
+    SongDetail.Position = UDim2.fromOffset(14, 53)
+    SongDetail.Size = UDim2.new(1, -28, 0, 13)
+
+    --// Seek bar \\--
+    local SeekBar = Instance.new("TextButton")
+    SeekBar.BackgroundColor3 = Library.Scheme.BackgroundColor
+    SeekBar.BackgroundTransparency = 0.2
+    SeekBar.BorderSizePixel = 0
+    SeekBar.AutoButtonColor = false
+    SeekBar.Text = ""
+    SeekBar.Size = UDim2.new(1, -28, 0, 14)
+    SeekBar.Position = UDim2.fromOffset(14, 70)
+    SeekBar.Parent = NowPlayingCard
+
+    Library:AddToRegistry(SeekBar, { BackgroundColor3 = "BackgroundColor" })
+    MakeCorner(Library, SeekBar, 4)
+    MakeStroke(Library, SeekBar)
+
+    local SeekFill = Instance.new("Frame")
+    SeekFill.BackgroundColor3 = Library.Scheme.AccentColor
+    SeekFill.BorderSizePixel = 0
+    SeekFill.Size = UDim2.fromScale(0, 1)
+    SeekFill.ZIndex = 2
+    SeekFill.Parent = SeekBar
+
+    Library:AddToRegistry(SeekFill, { BackgroundColor3 = "AccentColor" })
+    MakeCorner(Library, SeekFill, 4)
+
+    local SeekKnob = Instance.new("Frame")
+    SeekKnob.BackgroundColor3 = Library.Scheme.WhiteColor
+    SeekKnob.BorderSizePixel = 0
+    SeekKnob.AnchorPoint = Vector2.new(0.5, 0.5)
+    SeekKnob.Position = UDim2.new(0, 0, 0.5, 0)
+    SeekKnob.Size = UDim2.fromOffset(10, 10)
+    SeekKnob.ZIndex = 3
+    SeekKnob.Parent = SeekBar
+
+    Library:AddToRegistry(SeekKnob, { BackgroundColor3 = "WhiteColor" })
+    local SeekKnobCorner = Instance.new("UICorner")
+    SeekKnobCorner.CornerRadius = UDim.new(1, 0)
+    SeekKnobCorner.Parent = SeekKnob
+
+    local TimeCurrent = MakeText(Library, NowPlayingCard, "0:00", 9, false, 0.45)
+    TimeCurrent.Position = UDim2.fromOffset(14, 87)
+    TimeCurrent.Size = UDim2.fromOffset(70, 12)
+
+    local TimeTotal = MakeText(Library, NowPlayingCard, "--:--", 9, false, 0.45)
+    TimeTotal.AnchorPoint = Vector2.new(1, 0)
+    TimeTotal.Position = UDim2.new(1, -14, 0, 87)
+    TimeTotal.Size = UDim2.fromOffset(70, 12)
+    TimeTotal.TextXAlignment = Enum.TextXAlignment.Right
+
+    --// Transport row: prev / play-pause / stop / next \\--
+    local TransportRow = Instance.new("Frame")
+    TransportRow.BackgroundTransparency = 1
+    TransportRow.BorderSizePixel = 0
+    TransportRow.Position = UDim2.fromOffset(0, 104)
+    TransportRow.Size = UDim2.new(1, 0, 0, 36)
+    TransportRow.Parent = NowPlayingCard
+
+    local TransportLayout = Instance.new("UIListLayout")
+    TransportLayout.FillDirection = Enum.FillDirection.Horizontal
+    TransportLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    TransportLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    TransportLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    TransportLayout.Padding = UDim.new(0, 8)
+    TransportLayout.Parent = TransportRow
+
+    local ControlWidth = Compact and 34 or 40
+    local PlayWidth = Compact and 48 or 58
+
+    local PrevButton = MakeControlButton(TransportRow, ControlWidth, "skip-back", false)
+    PrevButton.LayoutOrder = 1
+
+    local PlayPauseButton, PlayPauseIcon = MakeControlButton(TransportRow, PlayWidth, "play", true)
+    PlayPauseButton.LayoutOrder = 2
+
+    local StopButton = MakeControlButton(TransportRow, ControlWidth, "square", false)
+    StopButton.LayoutOrder = 3
+
+    local NextButton = MakeControlButton(TransportRow, ControlWidth, "skip-forward", false)
+    NextButton.LayoutOrder = 4
+
+    --// Mode row: loop / shuffle \\--
+    local ModeRow = Instance.new("Frame")
+    ModeRow.BackgroundTransparency = 1
+    ModeRow.BorderSizePixel = 0
+    ModeRow.Position = UDim2.fromOffset(0, 148)
+    ModeRow.Size = UDim2.new(1, 0, 0, 26)
+    ModeRow.Parent = NowPlayingCard
+
+    local ModeLayout = Instance.new("UIListLayout")
+    ModeLayout.FillDirection = Enum.FillDirection.Horizontal
+    ModeLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    ModeLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    ModeLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    ModeLayout.Padding = UDim.new(0, 8)
+    ModeLayout.Parent = ModeRow
+
+    local LoopButton, LoopIcon, LoopLabel, LoopState =
+        MakeModeToggle(ModeRow, Compact and 58 or 66, "repeat", "Loop")
+    local ShuffleButton, ShuffleIcon, ShuffleLabel, ShuffleState =
+        MakeModeToggle(ModeRow, Compact and 70 or 80, "shuffle", "Shuffle")
+
+    --// Audio card (left column) \\--
+    local AudioCard = MakePanel(Library, LeftColumn, UDim2.new(1, 0, 0, 122))
+    AudioCard.LayoutOrder = 2
+
+    local AudioTitle = MakeText(Library, AudioCard, "Audio", 15, true, 0)
+    AudioTitle.Position = UDim2.fromOffset(14, 12)
+    AudioTitle.Size = UDim2.new(1, -28, 0, 18)
+
+    local VolumeIcon = MakeIcon(Library, AudioCard, "volume-2", 14, "FontColor")
+    VolumeIcon.Position = UDim2.fromOffset(14, 39)
+
+    local VolumeLabel = MakeText(Library, AudioCard, "Volume", 11, false, 0.35)
+    VolumeLabel.Position = UDim2.fromOffset(35, 38)
+    VolumeLabel.Size = UDim2.new(1, -110, 0, 15)
+
+    local VolumeValue = MakeText(Library, AudioCard, tostring(Volume) .. "%", 11, true, 0)
+    VolumeValue.AnchorPoint = Vector2.new(1, 0)
+    VolumeValue.Position = UDim2.new(1, -14, 0, 38)
+    VolumeValue.Size = UDim2.fromOffset(70, 15)
+    VolumeValue.TextXAlignment = Enum.TextXAlignment.Right
+    SetLabelScheme(Library, VolumeValue, "AccentColor")
+
+    local VolumeSlider = MakeMusicSlider(AudioCard, 58, 0, 100, 1, Volume, function(Value: number)
+        Volume = Value
+        Sound.Volume = Value / 100
+        SetText(VolumeValue, tostring(Value) .. "%")
+    end)
+
+    local SpeedIcon = MakeIcon(Library, AudioCard, "gauge", 14, "FontColor")
+    SpeedIcon.Position = UDim2.fromOffset(14, 79)
+
+    local SpeedLabel = MakeText(Library, AudioCard, "Speed / Pitch", 11, false, 0.35)
+    SpeedLabel.Position = UDim2.fromOffset(35, 78)
+    SpeedLabel.Size = UDim2.new(1, -110, 0, 15)
+
+    local SpeedValue = MakeText(Library, AudioCard, string.format("%.2fx", Speed), 11, true, 0)
+    SpeedValue.AnchorPoint = Vector2.new(1, 0)
+    SpeedValue.Position = UDim2.new(1, -14, 0, 78)
+    SpeedValue.Size = UDim2.fromOffset(70, 15)
+    SpeedValue.TextXAlignment = Enum.TextXAlignment.Right
+    SetLabelScheme(Library, SpeedValue, "AccentColor")
+
+    local SpeedSlider = MakeMusicSlider(AudioCard, 96, 0.25, 3, 0.05, Speed, function(Value: number)
+        Speed = Value
+        Sound.PlaybackSpeed = Value
+        SetText(SpeedValue, string.format("%.2fx", Value))
+    end)
+
+    --// Add music card (right column) \\--
+    local AddCard = MakePanel(Library, RightColumn, UDim2.new(1, 0, 0, 126))
+    AddCard.LayoutOrder = 1
+
+    local AddTitle = MakeText(Library, AddCard, "Add Music", 15, true, 0)
+    AddTitle.Position = UDim2.fromOffset(14, 12)
+    AddTitle.Size = UDim2.new(1, -28, 0, 18)
+
+    local NameBox = MakeInputBox(AddCard, 34, "Song name (optional)")
+    local SourceBox = MakeInputBox(AddCard, 64, "Asset ID or file name like song.mp3")
+
+    local AddButtonsRow = Instance.new("Frame")
+    AddButtonsRow.BackgroundTransparency = 1
+    AddButtonsRow.BorderSizePixel = 0
+    AddButtonsRow.Position = UDim2.fromOffset(14, 94)
+    AddButtonsRow.Size = UDim2.new(1, -28, 0, 24)
+    AddButtonsRow.Parent = AddCard
+
+    local AddButtonsLayout = Instance.new("UIListLayout")
+    AddButtonsLayout.FillDirection = Enum.FillDirection.Horizontal
+    AddButtonsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    AddButtonsLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    AddButtonsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    AddButtonsLayout.Padding = UDim.new(0, 8)
+    AddButtonsLayout.Parent = AddButtonsRow
+
+    local AddAssetButton = MakeAddButton(AddButtonsRow, "disc", "Asset ID")
+    local AddFileButton = MakeAddButton(AddButtonsRow, "file-audio", "MP3 File")
+
+    --// Playlist card (right column) \\--
+    local PlaylistCard = MakePanel(Library, RightColumn, UDim2.new(1, 0, 0, 174))
+    PlaylistCard.LayoutOrder = 2
+
+    local PlaylistTitle = MakeText(Library, PlaylistCard, "Playlist", 15, true, 0)
+    PlaylistTitle.Position = UDim2.fromOffset(14, 12)
+    PlaylistTitle.Size = UDim2.new(1, -110, 0, 18)
+
+    local CountLabel = MakeText(Library, PlaylistCard, "0 songs", 10, false, 0.45)
+    CountLabel.AnchorPoint = Vector2.new(1, 0)
+    CountLabel.Position = UDim2.new(1, -82, 0, 15)
+    CountLabel.Size = UDim2.fromOffset(64, 14)
+    CountLabel.TextXAlignment = Enum.TextXAlignment.Right
+
+    local ClearButton = Instance.new("TextButton")
+    ClearButton.BackgroundColor3 = Library.Scheme.BackgroundColor
+    ClearButton.BackgroundTransparency = 0.35
+    ClearButton.BorderSizePixel = 0
+    ClearButton.AutoButtonColor = false
+    ClearButton.Text = ""
+    ClearButton.AnchorPoint = Vector2.new(1, 0)
+    ClearButton.Position = UDim2.new(1, -14, 0, 11)
+    ClearButton.Size = UDim2.fromOffset(60, 20)
+    ClearButton.ClipsDescendants = true
+    ClearButton.Parent = PlaylistCard
+
+    Library:AddToRegistry(ClearButton, { BackgroundColor3 = "BackgroundColor" })
+    MakeCorner(Library, ClearButton, 4)
+    MakeStroke(Library, ClearButton)
+
+    local ClearInner = Instance.new("Frame")
+    ClearInner.AnchorPoint = Vector2.new(0.5, 0.5)
+    ClearInner.BackgroundTransparency = 1
+    ClearInner.BorderSizePixel = 0
+    ClearInner.Position = UDim2.fromScale(0.5, 0.5)
+    ClearInner.Size = UDim2.new(1, -4, 1, 0)
+    ClearInner.Parent = ClearButton
+
+    local ClearInnerLayout = Instance.new("UIListLayout")
+    ClearInnerLayout.FillDirection = Enum.FillDirection.Horizontal
+    ClearInnerLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    ClearInnerLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    ClearInnerLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    ClearInnerLayout.Padding = UDim.new(0, 5)
+    ClearInnerLayout.Parent = ClearInner
+
+    local ClearIcon = MakeIcon(Library, ClearButton, "trash-2", 12, "FontColor")
+    ClearIcon.Parent = ClearInner
+    ClearIcon.LayoutOrder = 1
+
+    local ClearLabel = MakeText(Library, ClearButton, "Clear", 10, true, 0.35)
+    ClearLabel.Parent = ClearInner
+    ClearLabel.LayoutOrder = 2
+    ClearLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+    ClearButton.MouseEnter:Connect(function()
+        SetIconColorScheme(Library, ClearIcon, "DestructiveColor")
+        TweenService:Create(ClearButton, Library.TweenInfo, { BackgroundTransparency = 0.15 }):Play()
+    end)
+    ClearButton.MouseLeave:Connect(function()
+        SetIconColorScheme(Library, ClearIcon, "FontColor")
+        TweenService:Create(ClearButton, Library.TweenInfo, { BackgroundTransparency = 0.35 }):Play()
+    end)
+
+    local PlaylistSub = MakeText(Library, PlaylistCard, "Tap a song to play it", 10, false, 0.45)
+    PlaylistSub.Position = UDim2.fromOffset(14, 32)
+    PlaylistSub.Size = UDim2.new(1, -28, 0, 13)
+
+    local SongList = Instance.new("ScrollingFrame")
+    SongList.BackgroundTransparency = 1
+    SongList.BorderSizePixel = 0
+    SongList.Size = UDim2.new(1, -16, 1, -58)
+    SongList.Position = UDim2.fromOffset(8, 50)
+    SongList.CanvasSize = UDim2.fromOffset(0, 0)
+    SongList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    SongList.ScrollBarThickness = 2
+    SongList.ScrollingDirection = Enum.ScrollingDirection.Y
+    SongList.Parent = PlaylistCard
+
+    Library:AddToRegistry(SongList, { ScrollBarImageColor3 = "OutlineColor" })
+    SongList.ScrollBarImageColor3 = Library.Scheme.OutlineColor
+
+    local SongListLayout = Instance.new("UIListLayout")
+    SongListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    SongListLayout.Padding = UDim.new(0, 4)
+    SongListLayout.Parent = SongList
+
+    local EmptyLabel = MakeText(Library, SongList, "No songs yet, add an asset ID or an .mp3 file", 10, false, 0.25)
+    EmptyLabel.Name = "EmptyState"
+    EmptyLabel.Size = UDim2.new(1, 0, 0, 22)
+    EmptyLabel.TextXAlignment = Enum.TextXAlignment.Center
+    EmptyLabel.LayoutOrder = 0
+
+    --// Seek dragger (jump position inside the loaded song) \\--
+    local SeekDragger = AddDragger({
+        UpdateFromMouse = function()
+            local Length = Sound.TimeLength
+            if CurrentIndex == 0 or Length <= 0 or PlaybackState == "Stopped" then
+                return
+            end
+            local Relative = math.clamp((Mouse.X - SeekBar.AbsolutePosition.X) / math.max(SeekBar.AbsoluteSize.X, 1), 0, 1)
+            SeekFill.Size = UDim2.fromScale(Relative, 1)
+            SeekKnob.Position = UDim2.new(Relative, 0, 0.5, 0)
+            Sound.TimePosition = Relative * Length
+        end,
+    })
+
+    SeekBar.InputBegan:Connect(function(Input)
+        if Input.UserInputType == Enum.UserInputType.MouseButton1 or Input.UserInputType == Enum.UserInputType.Touch then
+            if CurrentIndex == 0 or Sound.TimeLength <= 0 or PlaybackState == "Stopped" then
+                return
+            end
+            BeginDrag(SeekDragger)
+        end
+    end)
+
+    --// Playback logic \\--
+    local function RandomIndex(): number
+        local Count = #Playlist
+        if Count <= 1 then
+            return Count == 1 and 1 or CurrentIndex
+        end
+
+        local Index = math.random(1, Count)
+        if Index == CurrentIndex then
+            Index = (Index % Count) + 1
+        end
+        return Index
+    end
+
+    UpdateNowPlaying = function()
+        local Song = Playlist[CurrentIndex]
+        if Song then
+            SetText(SongLabel, Song.Name)
+            SetText(SongDetail, Song.Detail)
+        else
+            SetText(SongLabel, "Nothing playing")
+            SetText(SongDetail, "Add songs from the playlist card")
+        end
+
+        if PlaybackState == "Playing" then
+            SetText(StatusLabel, "Playing")
+            SetLabelScheme(Library, StatusLabel, "AccentColor")
+            StatusLabel.TextTransparency = 0
+        elseif PlaybackState == "Paused" then
+            SetText(StatusLabel, "Paused")
+            SetLabelScheme(Library, StatusLabel, "FontColor")
+            StatusLabel.TextTransparency = 0.35
+        else
+            SetText(StatusLabel, "Stopped")
+            SetLabelScheme(Library, StatusLabel, "FontColor")
+            StatusLabel.TextTransparency = 0.45
+        end
+
+        PlayPauseIcon = SwapIcon(Library, PlayPauseIcon, PlaybackState == "Playing" and "pause" or "play", "WhiteColor")
+    end
+
+    StopSong = function()
+        PlaybackState = "Stopped"
+        Sound:Stop()
+        SeekFill.Size = UDim2.fromScale(0, 1)
+        SeekKnob.Position = UDim2.new(0, 0, 0.5, 0)
+        SetText(TimeCurrent, "0:00")
+        UpdateNowPlaying()
+    end
+
+    PlayIndex = function(Index: number)
+        local Song = Playlist[Index]
+        if not Song then
+            return
+        end
+
+        SwitchingSongs = true
+        CurrentIndex = Index
+        PlaybackState = "Playing"
+
+        Sound:Stop()
+        Sound.SoundId = Song.SoundId
+        Sound.Volume = Volume / 100
+        Sound.PlaybackSpeed = Speed
+        Sound.TimePosition = 0
+        Sound:Play()
+
+        task.delay(0.3, function()
+            SwitchingSongs = false
+        end)
+
+        --// Detect unloadable songs (bad asset id / missing file) and skip them \\--
+        task.spawn(function()
+            pcall(function()
+                ContentProvider:PreloadAsync({ Sound })
+            end)
+            task.wait(0.25)
+
+            if Sound.SoundId ~= Song.SoundId or CurrentIndex ~= Index or not Page.Parent then
+                return
+            end
+
+            if Sound.IsLoaded or Sound.TimeLength > 0 then
+                ConsecutiveFailures = 0
+                return
+            end
+
+            if PlaybackState ~= "Playing" then
+                return
+            end
+
+            ConsecutiveFailures += 1
+            if ConsecutiveFailures >= 3 then
+                Notify("Music Player", "Failed to load 3 songs in a row, playback stopped.")
+                StopSong()
+            else
+                Notify("Music Player", ('Could not load "%s", skipping.'):format(Song.Name))
+                NextSong()
+            end
+        end)
+
+        UpdateNowPlaying()
+        RefreshPlaylist()
+    end
+
+    AutoAdvance = function()
+        if SwitchingSongs or PlaybackState ~= "Playing" then
+            return
+        end
+        if os.clock() - LastAdvanceAt < 0.5 then
+            return
+        end
+        LastAdvanceAt = os.clock()
+
+        if Shuffle then
+            PlayIndex(RandomIndex())
+        elseif CurrentIndex < #Playlist then
+            PlayIndex(CurrentIndex + 1)
+        elseif LoopPlaylist then
+            PlayIndex(1)
+        else
+            StopSong()
+        end
+    end
+
+    table.insert(Connections, Sound.Ended:Connect(function()
+        AutoAdvance()
+    end))
+
+    NextSong = function()
+        if #Playlist == 0 then
+            Notify("Music Player", "The playlist is empty.")
+            return
+        end
+
+        if Shuffle then
+            PlayIndex(RandomIndex())
+        elseif CurrentIndex < #Playlist then
+            PlayIndex(CurrentIndex + 1)
+        else
+            PlayIndex(1)
+        end
+    end
+
+    PrevSong = function()
+        if #Playlist == 0 then
+            Notify("Music Player", "The playlist is empty.")
+            return
+        end
+
+        if Shuffle then
+            PlayIndex(RandomIndex())
+        elseif CurrentIndex > 1 then
+            PlayIndex(CurrentIndex - 1)
+        elseif LoopPlaylist then
+            PlayIndex(#Playlist)
+        else
+            PlayIndex(1)
+        end
+    end
+
+    TogglePlay = function()
+        if PlaybackState == "Playing" then
+            PlaybackState = "Paused"
+            Sound:Pause()
+            UpdateNowPlaying()
+        elseif PlaybackState == "Paused" then
+            local Length = Sound.TimeLength
+            if Length > 0 and Sound.TimePosition >= Length - 0.1 then
+                Sound.TimePosition = 0
+            end
+            PlaybackState = "Playing"
+            Sound:Resume()
+            UpdateNowPlaying()
+        elseif CurrentIndex > 0 and Playlist[CurrentIndex] then
+            PlayIndex(CurrentIndex)
+        elseif #Playlist > 0 then
+            PlayIndex(Shuffle and RandomIndex() or 1)
+        else
+            Notify("Music Player", "The playlist is empty.")
+        end
+    end
+
+    RemoveSong = function(Index: number)
+        local Song = Playlist[Index]
+        if not Song then
+            return
+        end
+
+        local WasCurrent = Index == CurrentIndex
+        local WasPlaying = PlaybackState == "Playing"
+        table.remove(Playlist, Index)
+
+        if WasCurrent then
+            if #Playlist == 0 then
+                CurrentIndex = 0
+                StopSong()
+            elseif WasPlaying then
+                PlayIndex(math.clamp(Index, 1, #Playlist))
+            else
+                CurrentIndex = 0
+                StopSong()
+            end
+        elseif Index < CurrentIndex then
+            CurrentIndex -= 1
+        end
+
+        RefreshPlaylist()
+        Notify("Music Player", "Removed " .. tostring(Song.Name) .. ".")
+    end
+
+    RefreshPlaylist = function()
+        SetText(CountLabel, #Playlist == 1 and "1 song" or (#Playlist .. " songs"))
+        EmptyLabel.Visible = #Playlist == 0
+
+        for _, Child in SongList:GetChildren() do
+            if Child.Name == "SongRow" then
+                Child:Destroy()
+            end
+        end
+
+        for Index, Song in Playlist do
+            local IsCurrent = Index == CurrentIndex
+
+            local Row = Instance.new("TextButton")
+            Row.Name = "SongRow"
+            Row.BackgroundColor3 = Library.Scheme.BackgroundColor
+            Row.BackgroundTransparency = IsCurrent and 0 or 0.35
+            Row.BorderSizePixel = 0
+            Row.AutoButtonColor = false
+            Row.Text = ""
+            Row.Size = UDim2.new(1, 0, 0, 30)
+            Row.LayoutOrder = Index
+            Row.Parent = SongList
+
+            Library:AddToRegistry(Row, { BackgroundColor3 = "BackgroundColor" })
+            MakeCorner(Library, Row, 4)
+
+            local Indicator = MakeIcon(Library, Row, "music", 13, IsCurrent and "AccentColor" or "FontColor")
+            Indicator.Position = UDim2.fromOffset(8, 8)
+
+            if not IsCurrent then
+                if Indicator:IsA("TextLabel") or Indicator:IsA("TextButton") then
+                    Indicator.TextTransparency = 0.5
+                else
+                    Indicator.ImageTransparency = 0.5
+                end
+            end
+
+            local NameLabel = MakeText(
+                Library,
+                Row,
+                Index .. ". " .. tostring(Song.Name),
+                11,
+                IsCurrent,
+                IsCurrent and 0 or 0.3
+            )
+            NameLabel.Position = UDim2.fromOffset(28, 8)
+            NameLabel.Size = UDim2.new(1, -110, 0, 14)
+
+            local Badge = Instance.new("Frame")
+            Badge.BackgroundColor3 = Library.Scheme.AccentColor
+            Badge.BackgroundTransparency = 0.82
+            Badge.BorderSizePixel = 0
+            Badge.AnchorPoint = Vector2.new(1, 0.5)
+            Badge.Position = UDim2.new(1, -36, 0.5, 0)
+            Badge.Size = UDim2.fromOffset(32, 16)
+            Badge.Parent = Row
+
+            Library:AddToRegistry(Badge, { BackgroundColor3 = "AccentColor" })
+            MakeCorner(Library, Badge, 4)
+
+            local BadgeLabel = Instance.new("TextLabel")
+            BadgeLabel.BackgroundTransparency = 1
+            BadgeLabel.Size = UDim2.fromScale(1, 1)
+            BadgeLabel.Text = tostring(Song.Badge)
+            BadgeLabel.TextSize = 9
+            BadgeLabel.TextXAlignment = Enum.TextXAlignment.Center
+            BadgeLabel.TextYAlignment = Enum.TextYAlignment.Center
+            BadgeLabel.Parent = Badge
+
+            Library:AddToRegistry(BadgeLabel, { TextColor3 = "AccentColor", FontFace = "Font" })
+            BadgeLabel.TextColor3 = Library.Scheme.AccentColor
+            BadgeLabel.FontFace = Library.Scheme.Font
+
+            local Remove = Instance.new("TextButton")
+            Remove.BackgroundColor3 = Library.Scheme.DestructiveColor
+            Remove.BackgroundTransparency = 1
+            Remove.BorderSizePixel = 0
+            Remove.AutoButtonColor = false
+            Remove.Text = ""
+            Remove.AnchorPoint = Vector2.new(1, 0.5)
+            Remove.Position = UDim2.new(1, -6, 0.5, 0)
+            Remove.Size = UDim2.fromOffset(24, 24)
+            Remove.Parent = Row
+
+            Library:AddToRegistry(Remove, { BackgroundColor3 = "DestructiveColor" })
+            MakeCorner(Library, Remove, 4)
+
+            local RemoveIcon = MakeIcon(Library, Remove, "x", 12, "FontColor")
+            RemoveIcon.AnchorPoint = Vector2.new(0.5, 0.5)
+            RemoveIcon.Position = UDim2.fromScale(0.5, 0.5)
+
+            Row.MouseEnter:Connect(function()
+                TweenService:Create(Row, Library.TweenInfo, { BackgroundTransparency = IsCurrent and 0 or 0.15 }):Play()
+            end)
+            Row.MouseLeave:Connect(function()
+                TweenService:Create(Row, Library.TweenInfo, { BackgroundTransparency = IsCurrent and 0 or 0.35 }):Play()
+            end)
+            Row.MouseButton1Click:Connect(function()
+                if Index == CurrentIndex then
+                    TogglePlay()
+                else
+                    PlayIndex(Index)
+                end
+            end)
+
+            Remove.MouseEnter:Connect(function()
+                SetIconColorScheme(Library, RemoveIcon, "DestructiveColor")
+                TweenService:Create(Remove, Library.TweenInfo, { BackgroundTransparency = 0.85 }):Play()
+            end)
+            Remove.MouseLeave:Connect(function()
+                SetIconColorScheme(Library, RemoveIcon, "FontColor")
+                TweenService:Create(Remove, Library.TweenInfo, { BackgroundTransparency = 1 }):Play()
+            end)
+            Remove.MouseButton1Click:Connect(function()
+                RemoveSong(Index)
+            end)
+        end
+    end
+
+    local function ClearPlaylist()
+        if #Playlist == 0 then
+            Notify("Music Player", "The playlist is already empty.")
+            return
+        end
+
+        table.clear(Playlist)
+        CurrentIndex = 0
+        StopSong()
+        RefreshPlaylist()
+        Notify("Music Player", "Playlist cleared.")
+    end
+
+    --// Resolves a workspace .mp3 into a playable rbxasset uri \\--
+    local function AddFileSong(FileName: any, Name: any): boolean
+        local Clean = Trim(tostring(FileName))
+        if Clean == "" then
+            Notify("Music Player", "Enter a file name like song.mp3 first.")
+            return false
+        end
+
+        local Resolver = (typeof(getcustomasset) == "function" and getcustomasset)
+            or (typeof(getsynasset) == "function" and getsynasset)
+        if not Resolver then
+            Notify("Music Player", "This executor cannot load local files (getcustomasset is missing).")
+            return false
+        end
+
+        local Uri = nil
+        for _, Candidate in { Clean, "workspace/" .. Clean } do
+            local Ok, Result = pcall(Resolver, Candidate)
+            if Ok and typeof(Result) == "string" and Result ~= "" then
+                Uri = Result
+                break
+            end
+        end
+
+        if not Uri then
+            Notify(
+                "Music Player",
+                ('Could not load "%s", place the .mp3 inside your executor workspace folder.'):format(Clean)
+            )
+            return false
+        end
+
+        local Label = (Name ~= nil and Trim(tostring(Name)) ~= "") and Trim(tostring(Name))
+            or (Clean:gsub("%.[^%.]+$", "") or Clean)
+
+        table.insert(Playlist, {
+            Name = Label,
+            Badge = "MP3",
+            Detail = "Local file - " .. Clean,
+            SoundId = Uri,
+        })
+        return true
+    end
+
+    local function AddAssetSong(Source: any, Name: any): boolean
+        local Id = tostring(Source):match("%d+")
+        if not Id then
+            Notify("Music Player", "That does not look like a valid asset ID.")
+            return false
+        end
+
+        local Label = (Name ~= nil and Trim(tostring(Name)) ~= "") and Trim(tostring(Name)) or ("Asset " .. Id)
+
+        table.insert(Playlist, {
+            Name = Label,
+            Badge = "ID",
+            Detail = "Roblox asset - rbxassetid://" .. Id,
+            SoundId = "rbxassetid://" .. Id,
+        })
+        return true
+    end
+
+    local function AddFromInput(Mode: string)
+        local Source = Trim(tostring(SourceBox.Text))
+        local Name = Trim(tostring(NameBox.Text))
+
+        if Source == "" then
+            Notify("Music Player", "Enter an asset ID or an .mp3 file name first.")
+            return
+        end
+
+        local Added = false
+        if Mode == "Asset" then
+            Added = AddAssetSong(Source, Name)
+        else
+            Added = AddFileSong(Source, Name)
+        end
+
+        if Added then
+            NameBox.Text = ""
+            SourceBox.Text = ""
+            RefreshPlaylist()
+
+            --// The very first song starts playing right away \\--
+            if PlaybackState == "Stopped" and CurrentIndex == 0 then
+                PlayIndex(#Playlist)
+            end
+        end
+    end
+
+    --// Per-frame repaint for the seek bar & auto advance fallback \\--
+    local function UpdateMusic()
+        local Length = Sound.TimeLength
+        local Position = Sound.TimePosition
+
+        if PlaybackState ~= "Stopped" and Length > 0 and not SeekDragger.Dragging then
+            local Alpha = math.clamp(Position / Length, 0, 1)
+            SeekFill.Size = UDim2.fromScale(Alpha, 1)
+            SeekKnob.Position = UDim2.new(Alpha, 0, 0.5, 0)
+        end
+
+        SetText(TimeCurrent, FormatMusicTime(Position))
+        SetText(TimeTotal, Length > 0 and FormatMusicTime(Length) or "--:--")
+
+        if PlaybackState == "Playing" and Length > 0 and Position > 0 and Position >= Length - 0.06 then
+            AutoAdvance()
+        end
+    end
+
+    --// Button wiring \\--
+    PrevButton.MouseButton1Click:Connect(PrevSong)
+    PlayPauseButton.MouseButton1Click:Connect(TogglePlay)
+    StopButton.MouseButton1Click:Connect(StopSong)
+    NextButton.MouseButton1Click:Connect(NextSong)
+
+    local function SetLoop(Enabled: boolean)
+        LoopPlaylist = Enabled
+        SetModeVisual(LoopButton, LoopIcon, LoopLabel, LoopState, Enabled)
+    end
+
+    local function SetShuffle(Enabled: boolean)
+        Shuffle = Enabled
+        SetModeVisual(ShuffleButton, ShuffleIcon, ShuffleLabel, ShuffleState, Enabled)
+    end
+
+    LoopButton.MouseButton1Click:Connect(function()
+        SetLoop(not LoopPlaylist)
+    end)
+    ShuffleButton.MouseButton1Click:Connect(function()
+        SetShuffle(not Shuffle)
+    end)
+
+    AddAssetButton.MouseButton1Click:Connect(function()
+        AddFromInput("Asset")
+    end)
+    AddFileButton.MouseButton1Click:Connect(function()
+        AddFromInput("File")
+    end)
+    ClearButton.MouseButton1Click:Connect(ClearPlaylist)
+
+    SourceBox.FocusLost:Connect(function(EnterPressed)
+        if not EnterPressed then
+            return
+        end
+
+        local Text = Trim(tostring(SourceBox.Text))
+        if Text == "" then
+            return
+        end
+
+        --// Enter smart-detects asset ids vs file names \\--
+        if Text:match("^%d+$") or Text:match("^rbxassetid://%d+$") then
+            AddFromInput("Asset")
+        else
+            AddFromInput("File")
+        end
+    end)
+
+    local function DestroyMusic()
+        for _, Connection in Connections do
+            pcall(function()
+                Connection:Disconnect()
+            end)
+        end
+        table.clear(Connections)
+        table.clear(Draggers)
+
+        pcall(function()
+            Sound:Stop()
+        end)
+        Sound:Destroy()
+    end
+
+    RefreshPlaylist()
+    UpdateNowPlaying()
+
+    --// Music player API (also exposed through Dashboard.Music) \\--
+    return {
+        Update = UpdateMusic,
+        Destroy = DestroyMusic,
+
+        Play = function()
+            if PlaybackState ~= "Playing" then
+                TogglePlay()
+            end
+        end,
+        Pause = function()
+            if PlaybackState == "Playing" then
+                TogglePlay()
+            end
+        end,
+        Toggle = TogglePlay,
+        Stop = StopSong,
+        Next = NextSong,
+        Previous = PrevSong,
+
+        AddAsset = AddAssetSong,
+        AddFile = AddFileSong,
+        Remove = RemoveSong,
+        Clear = ClearPlaylist,
+        GetPlaylist = function()
+            return Playlist
+        end,
+
+        SetLoop = SetLoop,
+        SetShuffle = SetShuffle,
+        SetVolume = function(Value: number)
+            VolumeSlider.SetValue(Value)
+        end,
+        SetSpeed = function(Value: number)
+            SpeedSlider.SetValue(Value)
+        end,
+        IsPlaying = function()
+            return PlaybackState == "Playing"
+        end,
+    }
 end
 
 --// Dashboard creation \\--
@@ -509,7 +1789,13 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
 
     local SegmentConfig = typeof(Config.Segments) == "table" and Config.Segments or {}
     for Key, SegmentData in SegmentConfig do
-        if Key ~= "Details" and Key ~= 1 and typeof(Key) == "string" and typeof(SegmentData) == "table" then
+        if
+            Key ~= "Details"
+            and Key ~= "Music"
+            and Key ~= 1
+            and typeof(Key) == "string"
+            and typeof(SegmentData) == "table"
+        then
             table.insert(CustomSegments, { Key = Key, Data = SegmentData })
         end
     end
@@ -535,7 +1821,12 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
     end
 
     local ShowDetailsSegment = Config.ShowDetailsSegment ~= false
-    VisibleSegmentCount = (ShowDetailsSegment and 1 or 0) + #ShownCustomSegments
+    local ShowMusicSegment = Config.ShowMusicSegment ~= false
+    if ShowMusicSegment and typeof(SegmentConfig.Music) == "table" and SegmentConfig.Music.Show == false then
+        ShowMusicSegment = false
+    end
+
+    VisibleSegmentCount = (ShowDetailsSegment and 1 or 0) + (ShowMusicSegment and 1 or 0) + #ShownCustomSegments
 
     if VisibleSegmentCount <= 0 then
         ShowDetailsSegment = true
@@ -545,6 +1836,10 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
     --// Pages + segment buttons \\--
     local CardGap = 10
     local ContentHeight = 154 + CardGap + 112 --// tallest column: server + discord cards
+    if ShowMusicSegment then
+        --// music page: now playing (178) + audio (122) / add music (126) + playlist (174) cards
+        ContentHeight = math.max(ContentHeight, 178 + CardGap + 122)
+    end
 
     local ContentHolder = Instance.new("Frame")
     ContentHolder.BackgroundTransparency = 1
@@ -872,6 +2167,29 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
         )
     end
 
+    --// Music player segment, styled like the details & info page \\--
+    local MusicPlayer = nil
+    if ShowMusicSegment then
+        local MusicSegment = SegmentConfig.Music or {}
+        local MusicPage = CreateContentPage()
+        Pages.Music = MusicPage
+
+        MusicPlayer = CreateMusicPlayer(Library, MusicPage, {
+            Volume = Config.MusicVolume,
+            Speed = Config.MusicSpeed,
+            CardGap = CardGap,
+            SetScrolling = function(Enabled: boolean)
+                Root.ScrollingEnabled = Enabled
+            end,
+        })
+
+        MakeSegment(
+            "Music",
+            MusicSegment.Text or MusicSegment.Name or Config.MusicText,
+            MusicSegment.Icon or Config.MusicIcon
+        )
+    end
+
     for _, Entry in ShownCustomSegments do
         local SegmentText = Entry.Data.Text or Entry.Data.Name or Entry.Key
         local SegmentIcon = Entry.Data.Icon or "file-text"
@@ -957,6 +2275,10 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
 
         Accumulator += DeltaTime or 0
         if Accumulator < 0.5 then
+            --// The music player seek bar repaints every frame while its page is visible \\--
+            if MusicPlayer and ActivePage == "Music" and Tab.Container.Visible then
+                MusicPlayer.Update()
+            end
             return
         end
         Accumulator = 0
@@ -1001,6 +2323,7 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
         Frame = Root,
         ActivePage = "Details",
         Connections = { RenderConnection },
+        Music = MusicPlayer,
     }
 
     function Dashboard:SelectPage(PageName: string)
@@ -1013,6 +2336,12 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
     function Dashboard:Destroy()
         if RenderConnection and RenderConnection.Connected then
             RenderConnection:Disconnect()
+        end
+
+        if MusicPlayer then
+            MusicPlayer.Destroy()
+            MusicPlayer = nil
+            Dashboard.Music = nil
         end
 
         if Root and Root.Parent then
