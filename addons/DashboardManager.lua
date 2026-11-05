@@ -20,7 +20,7 @@ local LocalPlayer: Player = Players.LocalPlayer
 --// custom segment pages (changelog, script info, ...), plus a built-in music player segment
 --// styled like the details & info page: play / pause / stop, prev / next, seek bar, volume
 --// & speed sliders, playlist with asset ids and local .mp3 files, loop & shuffle modes and
---// an auto scan that loads every .mp3 from the executor workspace folder on script load.
+--// an auto scan that creates workspace/FALLENS.music and loads every .mp3 inside it on load.
 local DashboardManager = {
     Library = nil,
     Dashboard = nil,
@@ -386,6 +386,62 @@ end
 local function FormatMusicTime(Seconds: number): string
     Seconds = math.max(0, math.floor((tonumber(Seconds) or 0) + 0.5))
     return string.format("%d:%02d", math.floor(Seconds / 60), Seconds % 60)
+end
+
+--// Dedicated music folder inside the executor workspace: it is created automatically on
+--// load and every .mp3 / .ogg inside it is added to the playlist (subfolders included) \\--
+local MUSIC_FOLDER = "workspace/FALLENS/music"
+
+--// The dotted spelling of the folder is also scanned read-only, for users who created
+--// that variant instead of the slash one \\--
+local MUSIC_FOLDER_ALIASES = { "workspace.FALLENS.music" }
+
+--// Markers used to recognize music folder entries, listfiles can return bare names,
+--// "workspace/..." relative paths or full windows paths depending on the executor \\--
+local MUSIC_MARKERS = { "fallens/music/", "fallens.music/" }
+
+local function IsAudioFile(Name: string): boolean
+    local Lower = tostring(Name):lower()
+    return Lower:match("%.mp3$") ~= nil or Lower:match("%.ogg$") ~= nil
+end
+
+--// Strips everything up to the music folder and returns the path inside it, or nil when
+--// the entry does not point inside workspace/FALLENS.music \\--
+local function ToMusicRelative(Entry: any): string?
+    local Path = tostring(Entry):gsub("\\", "/")
+    local Lower = Path:lower()
+    for _, Marker in MUSIC_MARKERS do
+        local At = Lower:find(Marker, 1, true)
+        if At then
+            local Relative = Path:sub(At + #Marker)
+            if Relative ~= "" then
+                return Relative
+            end
+        end
+    end
+    return nil
+end
+
+--// Creates workspace/FALLENS/music when it is missing (one level at a time because some
+--// executors refuse nested creation). Returns true when the folder was created just now \\--
+local function EnsureMusicFolder(): boolean
+    if typeof(makefolder) ~= "function" then
+        return false
+    end
+
+    if typeof(isfolder) == "function" and isfolder(MUSIC_FOLDER) then
+        return false
+    end
+
+    local Path = ""
+    for Segment in MUSIC_FOLDER:gmatch("[^/]+") do
+        Path = Path == "" and Segment or (Path .. "/" .. Segment)
+        if typeof(isfolder) ~= "function" or not isfolder(Path) then
+            pcall(makefolder, Path)
+        end
+    end
+
+    return typeof(isfolder) ~= "function" or isfolder(MUSIC_FOLDER)
 end
 
 local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: any })
@@ -960,14 +1016,19 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
     end)
 
     --// Add music card (right column) \\--
-    local AddCard = MakePanel(Library, RightColumn, UDim2.new(1, 0, 0, 126))
+    local AddCard = MakePanel(Library, RightColumn, UDim2.new(1, 0, 0, 146))
     AddCard.LayoutOrder = 1
 
     local AddTitle = MakeText(Library, AddCard, "Add Music", 15, true, 0)
     AddTitle.Position = UDim2.fromOffset(14, 12)
     AddTitle.Size = UDim2.new(1, -100, 0, 18)
 
-    --// Rescan button: re-reads every .mp3 from the executor workspace folder \\--
+    --// Folder hint: tells the user where the auto-scanned music folder lives \\--
+    local AddFolderHint = MakeText(Library, AddCard, "Folder: " .. MUSIC_FOLDER, 10, false, 0.45)
+    AddFolderHint.Position = UDim2.fromOffset(14, 31)
+    AddFolderHint.Size = UDim2.new(1, -100, 0, 13)
+
+    --// Rescan button: re-reads every .mp3 from workspace/FALLENS.music \\--
     local RescanButton = Instance.new("TextButton")
     RescanButton.BackgroundColor3 = Library.Scheme.BackgroundColor
     RescanButton.BackgroundTransparency = 0.35
@@ -1022,13 +1083,13 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
         TweenService:Create(RescanButton, Library.TweenInfo, { BackgroundTransparency = 0.35 }):Play()
     end)
 
-    local NameBox = MakeInputBox(AddCard, 34, "Song name (optional)")
-    local SourceBox = MakeInputBox(AddCard, 64, "Asset ID or file name like song.mp3")
+    local NameBox = MakeInputBox(AddCard, 50, "Song name (optional)")
+    local SourceBox = MakeInputBox(AddCard, 80, "Asset ID or file name like song.mp3")
 
     local AddButtonsRow = Instance.new("Frame")
     AddButtonsRow.BackgroundTransparency = 1
     AddButtonsRow.BorderSizePixel = 0
-    AddButtonsRow.Position = UDim2.fromOffset(14, 94)
+    AddButtonsRow.Position = UDim2.fromOffset(14, 112)
     AddButtonsRow.Size = UDim2.new(1, -28, 0, 24)
     AddButtonsRow.Parent = AddCard
 
@@ -1130,9 +1191,11 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
     SongListLayout.Padding = UDim.new(0, 4)
     SongListLayout.Parent = SongList
 
-    local EmptyLabel = MakeText(Library, SongList, "No songs yet, add an asset ID or an .mp3 file", 10, false, 0.25)
+    local EmptyLabel = MakeText(Library, SongList, "No songs yet, drop .mp3 files into " .. MUSIC_FOLDER, 10, false, 0.25)
     EmptyLabel.Name = "EmptyState"
-    EmptyLabel.Size = UDim2.new(1, 0, 0, 22)
+    EmptyLabel.Size = UDim2.new(1, 0, 0, 30)
+    EmptyLabel.TextWrapped = true
+    EmptyLabel.TextTruncate = Enum.TextTruncate.None
     EmptyLabel.TextXAlignment = Enum.TextXAlignment.Center
     EmptyLabel.LayoutOrder = 0
 
@@ -1503,7 +1566,7 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
         Notify("Music Player", "Playlist cleared.")
     end
 
-    --// Resolves a workspace .mp3 into a playable rbxasset uri \\--
+    --// Resolves a .mp3 from workspace/FALLENS.music into a playable rbxasset uri \\--
     local function AddFileSong(FileName: any, Name: any, Silent: boolean?): boolean
         local Clean = Trim(tostring(FileName))
         if Clean == "" then
@@ -1522,11 +1585,33 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
             return false
         end
 
-        local Uri = nil
-        for _, Candidate in { Clean, "workspace/" .. Clean } do
+        --// Accepts bare names as well as full workspace/FALLENS/music/... spellings \\--
+        local Relative = Clean:gsub("\\", "/")
+        for _, Prefix in { "workspace/FALLENS/music/", "workspace.FALLENS.music/", "FALLENS/music/" } do
+            if Relative:sub(1, #Prefix):lower() == Prefix:lower() then
+                Relative = Relative:sub(#Prefix + 1)
+                break
+            end
+        end
+
+        if Relative == "" then
+            if not Silent then
+                Notify("Music Player", "Enter a file name like song.mp3 first.")
+            end
+            return false
+        end
+
+        --// The music folder is checked first, then the dotted alias, then the workspace root \\--
+        local Loaded, Uri = nil, nil
+        for _, Candidate in {
+            MUSIC_FOLDER .. "/" .. Relative,
+            "workspace.FALLENS.music/" .. Relative,
+            Relative,
+            "workspace/" .. Relative,
+        } do
             local Ok, Result = pcall(Resolver, Candidate)
             if Ok and typeof(Result) == "string" and Result ~= "" then
-                Uri = Result
+                Loaded, Uri = Candidate, Result
                 break
             end
         end
@@ -1535,21 +1620,22 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
             if not Silent then
                 Notify(
                     "Music Player",
-                    ('Could not load "%s", place the .mp3 inside your executor workspace folder.'):format(Clean)
+                    ('Could not load "%s", place the .mp3 inside %s.'):format(Relative, MUSIC_FOLDER)
                 )
             end
             return false
         end
 
         local Label = (Name ~= nil and Trim(tostring(Name)) ~= "") and Trim(tostring(Name))
-            or (Clean:gsub("%.[^%.]+$", "") or Clean)
+            or (Relative:gsub("%.[^%.]+$", "") or Relative)
 
+        local Ext = Relative:lower():match("%.([%w]+)$")
         table.insert(Playlist, {
             Name = Label,
-            Badge = "MP3",
-            Detail = "Local file - " .. Clean,
+            Badge = (Ext and Ext:upper()) or "MP3",
+            Detail = "Local file - " .. Loaded,
             SoundId = Uri,
-            File = Clean,
+            File = Relative,
         })
         return true
     end
@@ -1572,32 +1658,72 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
         return true
     end
 
-    --// Auto scan: lists every .mp3 / .ogg inside the executor workspace folder \\--
+    --// Auto scan: lists every .mp3 / .ogg inside workspace/FALLENS.music \\--
     local function ListAudioFiles(): { string }
         local Found: { string } = {}
         if typeof(listfiles) ~= "function" then
             return Found
         end
 
-        local Ok, Files = pcall(listfiles)
-        if not Ok or typeof(Files) ~= "table" then
-            return Found
-        end
+        --// Bare names are only trusted when we listed the music folder ourselves, entries
+        --// coming from a plain workspace listing must contain the music folder marker \\--
+        local function Collect(Entries: { any }, Direct: boolean, Prefix: string, Depth: number)
+            for _, RawPath in Entries do
+                local Path = tostring(RawPath):gsub("\\", "/")
+                if Path ~= "" then
+                    local Relative = ToMusicRelative(Path)
+                    if Relative == nil and (Direct or Prefix ~= "") then
+                        Relative = Prefix == "" and Path or (Prefix .. "/" .. Path)
+                    end
 
-        for _, RawPath in Files do
-            --// Entries can be "song.mp3", "workspace/song.mp3" or a full windows path \\--
-            local Path = tostring(RawPath):gsub("\\", "/")
-            local Name = Path:match("[^/]+$") or Path
-            local Lower = Name:lower()
-            if Lower:match("%.mp3$") or Lower:match("%.ogg$") then
-                table.insert(Found, Name)
+                    if Relative ~= nil then
+                        if IsAudioFile(Relative) then
+                            table.insert(Found, Relative)
+                        elseif Depth == 0 and not Relative:match("%.[^%.]+$") then
+                            --// A subfolder of the music folder, scan one level deeper \\--
+                            local SubOk, SubEntries = pcall(listfiles, MUSIC_FOLDER .. "/" .. Relative)
+                            if SubOk and typeof(SubEntries) == "table" then
+                                Collect(SubEntries, false, Relative, Depth + 1)
+                            end
+                        end
+                    end
+                end
             end
         end
 
-        table.sort(Found, function(A, B)
+        --// Prefer listing the music folder itself, then its dotted alias, then the root \\--
+        local Ok, Entries = pcall(listfiles, MUSIC_FOLDER)
+        if Ok and typeof(Entries) == "table" then
+            Collect(Entries, true, "", 0)
+        end
+
+        for _, Alias in MUSIC_FOLDER_ALIASES do
+            local AliasOk, AliasEntries = pcall(listfiles, Alias)
+            if AliasOk and typeof(AliasEntries) == "table" then
+                Collect(AliasEntries, true, "", 0)
+            end
+        end
+
+        local RootOk, RootEntries = pcall(listfiles)
+        if RootOk and typeof(RootEntries) == "table" then
+            Collect(RootEntries, false, "", 0)
+        end
+
+        --// Dedupe + sort case-insensitively so no song is ever listed twice \\--
+        local Seen: { [string]: boolean } = {}
+        local Unique: { string } = {}
+        for _, Name in Found do
+            local Key = Name:lower()
+            if not Seen[Key] then
+                Seen[Key] = true
+                table.insert(Unique, Name)
+            end
+        end
+
+        table.sort(Unique, function(A, B)
             return A:lower() < B:lower()
         end)
-        return Found
+        return Unique
     end
 
     local function HasFileSong(FileName: string): boolean
@@ -1616,10 +1742,16 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
             return 0
         end
 
+        --// The music folder is (re)created so there is always a place to drop songs \\--
+        EnsureMusicFolder()
+
         local Files = ListAudioFiles()
         if #Files == 0 then
             if not Silent then
-                Notify("Music Player", "No .mp3 files found in the executor workspace folder.")
+                Notify(
+                    "Music Player",
+                    ("No .mp3 files in %s yet, drop your songs inside that folder."):format(MUSIC_FOLDER)
+                )
             end
             return 0
         end
@@ -1633,7 +1765,7 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
 
         if Added > 0 then
             RefreshPlaylist()
-            Notify("Music Player", ("Auto-added %d song(s) from the workspace folder."):format(Added))
+            Notify("Music Player", ("Auto-added %d song(s) from %s."):format(Added, MUSIC_FOLDER))
         elseif not Silent then
             Notify("Music Player", "No new .mp3 files to add.")
         end
@@ -1757,9 +1889,15 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
     RefreshPlaylist()
     UpdateNowPlaying()
 
-    --// Auto scan: load every .mp3 from the executor workspace folder on script load \\--
+    --// Auto add: create workspace/FALLENS.music and load every song inside it \\--
     task.spawn(function()
-        ScanLocalFiles(true)
+        local Created = EnsureMusicFolder()
+        local Added = ScanLocalFiles(true)
+
+        --// Fresh install: point the user at the folder that was just made for them \\--
+        if Created and Added == 0 then
+            Notify("Music Player", ("Music folder ready: %s. Drop your .mp3 files inside it."):format(MUSIC_FOLDER))
+        end
     end)
 
     --// Music player API (also exposed through Dashboard.Music) \\--
