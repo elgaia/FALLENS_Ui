@@ -19,7 +19,8 @@ local LocalPlayer: Player = Players.LocalPlayer
 --// greeting), segment bar, server / discord / executor / friends cards with live stats and
 --// custom segment pages (changelog, script info, ...), plus a built-in music player segment
 --// styled like the details & info page: play / pause / stop, prev / next, seek bar, volume
---// & speed sliders, playlist with asset ids and local .mp3 files, loop & shuffle modes.
+--// & speed sliders, playlist with asset ids and local .mp3 files, loop & shuffle modes and
+--// an auto scan that loads every .mp3 from the executor workspace folder on script load.
 local DashboardManager = {
     Library = nil,
     Dashboard = nil,
@@ -521,15 +522,15 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
         return Button, Icon
     end
 
-    --// Loop / shuffle mode toggle \\--
-    local function MakeModeToggle(Parent: GuiObject, Width: number, IconName: string, Text: string)
+    --// Loop / shuffle mode toggle pill \\--
+    local function MakeModeToggle(Parent: GuiObject, IconName: string, Text: string)
         local Button = Instance.new("TextButton")
         Button.BackgroundColor3 = Library.Scheme.BackgroundColor
         Button.BackgroundTransparency = 0.25
         Button.BorderSizePixel = 0
         Button.AutoButtonColor = false
         Button.Text = ""
-        Button.Size = UDim2.fromOffset(Width, 26)
+        Button.Size = UDim2.new(0.5, -4, 1, 0)
         Button.ClipsDescendants = true
         Button.Parent = Parent
 
@@ -542,7 +543,7 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
         Inner.BackgroundTransparency = 1
         Inner.BorderSizePixel = 0
         Inner.Position = UDim2.fromScale(0.5, 0.5)
-        Inner.Size = UDim2.new(1, -8, 1, 0)
+        Inner.Size = UDim2.new(1, -12, 1, 0)
         Inner.Parent = Button
 
         local InnerLayout = Instance.new("UIListLayout")
@@ -553,14 +554,33 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
         InnerLayout.Padding = UDim.new(0, 6)
         InnerLayout.Parent = Inner
 
-        local Icon = MakeIcon(Library, Button, IconName, 13, "FontColor")
+        local Icon = MakeIcon(Library, Button, IconName, 14, "FontColor")
         Icon.Parent = Inner
         Icon.LayoutOrder = 1
 
-        local Label = MakeText(Library, Button, Text, 10, true, 0.25)
+        local Label = MakeText(Library, Button, Text, 11, true, 0.25)
         Label.Parent = Inner
         Label.LayoutOrder = 2
         Label.TextXAlignment = Enum.TextXAlignment.Left
+
+        --// Measure the label so it hugs its text: a scale-sized label stretches to the
+        --// full pill width and pushes the icon out of the button (clipped, off-center)
+        local TextWidth = select(1, Library:GetTextBounds(Text, Library.Scheme.Font, 11))
+        Label.Size = UDim2.new(0, math.max(24, TextWidth + 2), 0, 17)
+
+        --// Status dot on the right edge: dim when off, lit while the mode is on \\--
+        local Dot = Instance.new("Frame")
+        Dot.BackgroundColor3 = Library.Scheme.OutlineColor
+        Dot.BorderSizePixel = 0
+        Dot.AnchorPoint = Vector2.new(1, 0.5)
+        Dot.Position = UDim2.new(1, -9, 0.5, 0)
+        Dot.Size = UDim2.fromOffset(5, 5)
+        Dot.Parent = Button
+
+        Library:AddToRegistry(Dot, { BackgroundColor3 = "OutlineColor" })
+        local DotCorner = Instance.new("UICorner")
+        DotCorner.CornerRadius = UDim.new(1, 0)
+        DotCorner.Parent = Dot
 
         local State = { On = false }
 
@@ -571,10 +591,17 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
             TweenService:Create(Button, Library.TweenInfo, { BackgroundTransparency = State.On and 0.1 or 0.25 }):Play()
         end)
 
-        return Button, Icon, Label, State
+        return Button, Icon, Label, State, Dot
     end
 
-    local function SetModeVisual(Button: any, Icon: any, Label: any, State: { [string]: any }, IsOn: boolean)
+    local function SetModeVisual(
+        Button: any,
+        Icon: any,
+        Label: any,
+        State: { [string]: any },
+        Dot: any,
+        IsOn: boolean
+    )
         State.On = IsOn
         Button.BackgroundColor3 = IsOn and Library.Scheme.AccentColor or Library.Scheme.BackgroundColor
         Button.BackgroundTransparency = IsOn and 0.1 or 0.25
@@ -586,6 +613,11 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
         SetIconColorScheme(Library, Icon, IsOn and "WhiteColor" or "FontColor")
         SetLabelScheme(Library, Label, IsOn and "WhiteColor" or "FontColor")
         Label.TextTransparency = IsOn and 0 or 0.25
+
+        Dot.BackgroundColor3 = IsOn and Library.Scheme.WhiteColor or Library.Scheme.OutlineColor
+        if Library.Registry[Dot] then
+            Library.Registry[Dot].BackgroundColor3 = IsOn and "WhiteColor" or "OutlineColor"
+        end
     end
 
     --// Generic slider bar (volume / speed) \\--
@@ -718,7 +750,7 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
         Inner.BackgroundTransparency = 1
         Inner.BorderSizePixel = 0
         Inner.Position = UDim2.fromScale(0.5, 0.5)
-        Inner.Size = UDim2.new(1, -6, 1, 0)
+        Inner.Size = UDim2.new(1, -10, 1, 0)
         Inner.Parent = Button
 
         local InnerLayout = Instance.new("UIListLayout")
@@ -729,14 +761,20 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
         InnerLayout.Padding = UDim.new(0, 6)
         InnerLayout.Parent = Inner
 
-        local Icon = MakeIcon(Library, Button, IconName, 13, "FontColor")
+        --// Accent icon makes the pair read as action buttons \\--
+        local Icon = MakeIcon(Library, Button, IconName, 14, "AccentColor")
         Icon.Parent = Inner
         Icon.LayoutOrder = 1
 
-        local Label = MakeText(Library, Button, Text, 10, true, 0.25)
+        local Label = MakeText(Library, Button, Text, 11, true, 0.25)
         Label.Parent = Inner
         Label.LayoutOrder = 2
         Label.TextXAlignment = Enum.TextXAlignment.Left
+
+        --// Measure the label so it hugs its text: a scale-sized label stretches to the
+        --// full pill width and pushes the icon out of the button (clipped, off-center)
+        local TextWidth = select(1, Library:GetTextBounds(Text, Library.Scheme.Font, 11))
+        Label.Size = UDim2.new(0, math.max(24, TextWidth + 2), 0, 17)
 
         Button.MouseEnter:Connect(function()
             TweenService:Create(Button, Library.TweenInfo, { BackgroundTransparency = 0.1 }):Play()
@@ -850,12 +888,12 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
     local NextButton = MakeControlButton(TransportRow, ControlWidth, "skip-forward", false)
     NextButton.LayoutOrder = 4
 
-    --// Mode row: loop / shuffle \\--
+    --// Mode row: loop / shuffle (mirrors the add buttons row layout) \\--
     local ModeRow = Instance.new("Frame")
     ModeRow.BackgroundTransparency = 1
     ModeRow.BorderSizePixel = 0
-    ModeRow.Position = UDim2.fromOffset(0, 148)
-    ModeRow.Size = UDim2.new(1, 0, 0, 26)
+    ModeRow.Position = UDim2.fromOffset(14, 146)
+    ModeRow.Size = UDim2.new(1, -28, 0, 28)
     ModeRow.Parent = NowPlayingCard
 
     local ModeLayout = Instance.new("UIListLayout")
@@ -866,10 +904,12 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
     ModeLayout.Padding = UDim.new(0, 8)
     ModeLayout.Parent = ModeRow
 
-    local LoopButton, LoopIcon, LoopLabel, LoopState =
-        MakeModeToggle(ModeRow, Compact and 58 or 66, "repeat", "Loop")
-    local ShuffleButton, ShuffleIcon, ShuffleLabel, ShuffleState =
-        MakeModeToggle(ModeRow, Compact and 70 or 80, "shuffle", "Shuffle")
+    local LoopButton, LoopIcon, LoopLabel, LoopState, LoopDot =
+        MakeModeToggle(ModeRow, "repeat", "Loop")
+    LoopButton.LayoutOrder = 1
+    local ShuffleButton, ShuffleIcon, ShuffleLabel, ShuffleState, ShuffleDot =
+        MakeModeToggle(ModeRow, "shuffle", "Shuffle")
+    ShuffleButton.LayoutOrder = 2
 
     --// Audio card (left column) \\--
     local AudioCard = MakePanel(Library, LeftColumn, UDim2.new(1, 0, 0, 122))
@@ -925,7 +965,62 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
 
     local AddTitle = MakeText(Library, AddCard, "Add Music", 15, true, 0)
     AddTitle.Position = UDim2.fromOffset(14, 12)
-    AddTitle.Size = UDim2.new(1, -28, 0, 18)
+    AddTitle.Size = UDim2.new(1, -100, 0, 18)
+
+    --// Rescan button: re-reads every .mp3 from the executor workspace folder \\--
+    local RescanButton = Instance.new("TextButton")
+    RescanButton.BackgroundColor3 = Library.Scheme.BackgroundColor
+    RescanButton.BackgroundTransparency = 0.35
+    RescanButton.BorderSizePixel = 0
+    RescanButton.AutoButtonColor = false
+    RescanButton.Text = ""
+    RescanButton.AnchorPoint = Vector2.new(1, 0)
+    RescanButton.Position = UDim2.new(1, -14, 0, 11)
+    RescanButton.Size = UDim2.fromOffset(70, 20)
+    RescanButton.ClipsDescendants = true
+    RescanButton.Parent = AddCard
+
+    Library:AddToRegistry(RescanButton, { BackgroundColor3 = "BackgroundColor" })
+    MakeCorner(Library, RescanButton, 4)
+    MakeStroke(Library, RescanButton)
+
+    local RescanInner = Instance.new("Frame")
+    RescanInner.AnchorPoint = Vector2.new(0.5, 0.5)
+    RescanInner.BackgroundTransparency = 1
+    RescanInner.BorderSizePixel = 0
+    RescanInner.Position = UDim2.fromScale(0.5, 0.5)
+    RescanInner.Size = UDim2.new(1, -4, 1, 0)
+    RescanInner.Parent = RescanButton
+
+    local RescanInnerLayout = Instance.new("UIListLayout")
+    RescanInnerLayout.FillDirection = Enum.FillDirection.Horizontal
+    RescanInnerLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    RescanInnerLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    RescanInnerLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    RescanInnerLayout.Padding = UDim.new(0, 5)
+    RescanInnerLayout.Parent = RescanInner
+
+    local RescanIcon = MakeIcon(Library, RescanButton, "refresh-cw", 12, "FontColor")
+    RescanIcon.Parent = RescanInner
+    RescanIcon.LayoutOrder = 1
+
+    local RescanLabel = MakeText(Library, RescanButton, "Rescan", 10, true, 0.35)
+    RescanLabel.Parent = RescanInner
+    RescanLabel.LayoutOrder = 2
+    RescanLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+    --// Measure so the icon + label pair stays centered inside the pill \\--
+    local RescanTextWidth = select(1, Library:GetTextBounds("Rescan", Library.Scheme.Font, 10))
+    RescanLabel.Size = UDim2.new(0, math.max(20, RescanTextWidth + 2), 0, 15)
+
+    RescanButton.MouseEnter:Connect(function()
+        SetIconColorScheme(Library, RescanIcon, "AccentColor")
+        TweenService:Create(RescanButton, Library.TweenInfo, { BackgroundTransparency = 0.15 }):Play()
+    end)
+    RescanButton.MouseLeave:Connect(function()
+        SetIconColorScheme(Library, RescanIcon, "FontColor")
+        TweenService:Create(RescanButton, Library.TweenInfo, { BackgroundTransparency = 0.35 }):Play()
+    end)
 
     local NameBox = MakeInputBox(AddCard, 34, "Song name (optional)")
     local SourceBox = MakeInputBox(AddCard, 64, "Asset ID or file name like song.mp3")
@@ -1409,17 +1504,21 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
     end
 
     --// Resolves a workspace .mp3 into a playable rbxasset uri \\--
-    local function AddFileSong(FileName: any, Name: any): boolean
+    local function AddFileSong(FileName: any, Name: any, Silent: boolean?): boolean
         local Clean = Trim(tostring(FileName))
         if Clean == "" then
-            Notify("Music Player", "Enter a file name like song.mp3 first.")
+            if not Silent then
+                Notify("Music Player", "Enter a file name like song.mp3 first.")
+            end
             return false
         end
 
         local Resolver = (typeof(getcustomasset) == "function" and getcustomasset)
             or (typeof(getsynasset) == "function" and getsynasset)
         if not Resolver then
-            Notify("Music Player", "This executor cannot load local files (getcustomasset is missing).")
+            if not Silent then
+                Notify("Music Player", "This executor cannot load local files (getcustomasset is missing).")
+            end
             return false
         end
 
@@ -1433,10 +1532,12 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
         end
 
         if not Uri then
-            Notify(
-                "Music Player",
-                ('Could not load "%s", place the .mp3 inside your executor workspace folder.'):format(Clean)
-            )
+            if not Silent then
+                Notify(
+                    "Music Player",
+                    ('Could not load "%s", place the .mp3 inside your executor workspace folder.'):format(Clean)
+                )
+            end
             return false
         end
 
@@ -1448,6 +1549,7 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
             Badge = "MP3",
             Detail = "Local file - " .. Clean,
             SoundId = Uri,
+            File = Clean,
         })
         return true
     end
@@ -1468,6 +1570,74 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
             SoundId = "rbxassetid://" .. Id,
         })
         return true
+    end
+
+    --// Auto scan: lists every .mp3 / .ogg inside the executor workspace folder \\--
+    local function ListAudioFiles(): { string }
+        local Found: { string } = {}
+        if typeof(listfiles) ~= "function" then
+            return Found
+        end
+
+        local Ok, Files = pcall(listfiles)
+        if not Ok or typeof(Files) ~= "table" then
+            return Found
+        end
+
+        for _, RawPath in Files do
+            --// Entries can be "song.mp3", "workspace/song.mp3" or a full windows path \\--
+            local Path = tostring(RawPath):gsub("\\", "/")
+            local Name = Path:match("[^/]+$") or Path
+            local Lower = Name:lower()
+            if Lower:match("%.mp3$") or Lower:match("%.ogg$") then
+                table.insert(Found, Name)
+            end
+        end
+
+        table.sort(Found, function(A, B)
+            return A:lower() < B:lower()
+        end)
+        return Found
+    end
+
+    local function HasFileSong(FileName: string): boolean
+        local Lower = tostring(FileName):lower()
+        for _, Song in Playlist do
+            if Song.File and tostring(Song.File):lower() == Lower then
+                return true
+            end
+        end
+        return false
+    end
+
+    --// Adds every not-yet-listed audio file, returns how many were added \\--
+    local function ScanLocalFiles(Silent: boolean?): number
+        if not Page.Parent then
+            return 0
+        end
+
+        local Files = ListAudioFiles()
+        if #Files == 0 then
+            if not Silent then
+                Notify("Music Player", "No .mp3 files found in the executor workspace folder.")
+            end
+            return 0
+        end
+
+        local Added = 0
+        for _, Name in Files do
+            if not HasFileSong(Name) and AddFileSong(Name, nil, true) then
+                Added += 1
+            end
+        end
+
+        if Added > 0 then
+            RefreshPlaylist()
+            Notify("Music Player", ("Auto-added %d song(s) from the workspace folder."):format(Added))
+        elseif not Silent then
+            Notify("Music Player", "No new .mp3 files to add.")
+        end
+        return Added
     end
 
     local function AddFromInput(Mode: string)
@@ -1525,12 +1695,12 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
 
     local function SetLoop(Enabled: boolean)
         LoopPlaylist = Enabled
-        SetModeVisual(LoopButton, LoopIcon, LoopLabel, LoopState, Enabled)
+        SetModeVisual(LoopButton, LoopIcon, LoopLabel, LoopState, LoopDot, Enabled)
     end
 
     local function SetShuffle(Enabled: boolean)
         Shuffle = Enabled
-        SetModeVisual(ShuffleButton, ShuffleIcon, ShuffleLabel, ShuffleState, Enabled)
+        SetModeVisual(ShuffleButton, ShuffleIcon, ShuffleLabel, ShuffleState, ShuffleDot, Enabled)
     end
 
     LoopButton.MouseButton1Click:Connect(function()
@@ -1545,6 +1715,9 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
     end)
     AddFileButton.MouseButton1Click:Connect(function()
         AddFromInput("File")
+    end)
+    RescanButton.MouseButton1Click:Connect(function()
+        ScanLocalFiles(false)
     end)
     ClearButton.MouseButton1Click:Connect(ClearPlaylist)
 
@@ -1584,6 +1757,11 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
     RefreshPlaylist()
     UpdateNowPlaying()
 
+    --// Auto scan: load every .mp3 from the executor workspace folder on script load \\--
+    task.spawn(function()
+        ScanLocalFiles(true)
+    end)
+
     --// Music player API (also exposed through Dashboard.Music) \\--
     return {
         Update = UpdateMusic,
@@ -1608,6 +1786,7 @@ local function CreateMusicPlayer(Library, Page: GuiObject, Options: { [string]: 
         AddFile = AddFileSong,
         Remove = RemoveSong,
         Clear = ClearPlaylist,
+        Scan = ScanLocalFiles,
         GetPlaylist = function()
             return Playlist
         end,
