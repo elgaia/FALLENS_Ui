@@ -8,6 +8,7 @@ local RunService: RunService = cloneref(game:GetService("RunService"))
 local TweenService: TweenService = cloneref(game:GetService("TweenService"))
 local LocalizationService: LocalizationService = cloneref(game:GetService("LocalizationService"))
 local MarketplaceService: MarketplaceService = cloneref(game:GetService("MarketplaceService"))
+local TeleportService: TeleportService = cloneref(game:GetService("TeleportService"))
 local UserInputService: UserInputService = cloneref(game:GetService("UserInputService"))
 local SoundService: SoundService = cloneref(game:GetService("SoundService"))
 local ContentProvider: ContentProvider = cloneref(game:GetService("ContentProvider"))
@@ -21,6 +22,9 @@ local LocalPlayer: Player = Players.LocalPlayer
 --// styled like the details & info page: play / pause / stop, prev / next, seek bar, volume
 --// & speed sliders, playlist with asset ids and local .mp3 files, loop & shuffle modes and
 --// an auto scan that creates FALLENS/music and loads every .mp3 inside it on load.
+--// The details & info page also carries the server tools: a tap-to-copy Job ID row,
+--// server hop, small server hopping, join by Job ID and a privacy toggle that hides the
+--// username & display name locally (dashboard texts + the name above your own character).
 local DashboardManager = {
     Library = nil,
     Dashboard = nil,
@@ -81,6 +85,106 @@ local function SetText(Object: any, Text: string)
     if Object and Object.Parent then
         Object.Text = tostring(Text or "")
     end
+end
+
+--// Copies text through whichever clipboard function the executor exposes \\--
+local function CopyToClipboard(Text: string): boolean
+    if setclipboard then
+        setclipboard(Text)
+        return true
+    elseif toclipboard then
+        toclipboard(Text)
+        return true
+    elseif set_clipboard then
+        set_clipboard(Text)
+        return true
+    end
+
+    return false
+end
+
+--// Accepts a raw job id, a roblox.com server link (?jobId= / gameId=) or any text with a
+--// GUID inside it and returns the job id itself \\--
+local function ExtractJobId(Input: any): string?
+    local Text = tostring(Input or "")
+
+    local FromLink = Text:match("[?&]jobId=([%w%-]+)") or Text:match("[?&]gameId=([%w%-]+)")
+    if FromLink then
+        return FromLink
+    end
+
+    local Guid = Text:match("(%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x)")
+    if Guid then
+        return Guid
+    end
+
+    --// Loose fallback for ids that only survived as a dashed hex blob \\--
+    local Token = Trim(Text):match("^(%x[%x%-]+)$")
+    if Token and #Token >= 32 then
+        return Token
+    end
+
+    return nil
+end
+
+--// Server utilities used by the details & info page (job id copy, server hop,
+--// small server hopping and joining a server by job id) \\--
+local function GetCurrentJobId(): string
+    return tostring(game.JobId or "")
+end
+
+--// Pulls joinable public servers from the games api and skips the current instance.
+--// sortOrder=Asc lists the least populated servers first, which keeps the small server
+--// pick accurate even when only a single page gets fetched \\--
+local function FetchPublicServers(MaxPages: number): { [number]: any }
+    local Servers = {}
+    local Cursor: string? = nil
+
+    for _ = 1, math.max(1, MaxPages or 1) do
+        local Url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true")
+            :format(game.PlaceId)
+        if Cursor then
+            Url = Url .. "&cursor=" .. HttpService:UrlEncode(Cursor)
+        end
+
+        local Success, Body = pcall(function()
+            return game:HttpGet(Url)
+        end)
+        if not Success or typeof(Body) ~= "string" or Body == "" then
+            break
+        end
+
+        local Decoded, Data = pcall(HttpService.JSONDecode, HttpService, Body)
+        if not Decoded or typeof(Data) ~= "table" or typeof(Data.data) ~= "table" then
+            break
+        end
+
+        for _, Server in Data.data do
+            if
+                typeof(Server) == "table"
+                and typeof(Server.id) == "string"
+                and Server.id ~= GetCurrentJobId()
+                and (tonumber(Server.playing) or 0) < (tonumber(Server.maxPlayers) or math.huge)
+            then
+                table.insert(Servers, Server)
+            end
+        end
+
+        Cursor = typeof(Data.nextPageCursor) == "string" and Data.nextPageCursor or nil
+        if not Cursor then
+            break
+        end
+    end
+
+    return Servers
+end
+
+--// Joins the server behind a job id, returns false + the error message on failure \\--
+local function TeleportToJobId(JobId: string): (boolean, string)
+    local Ok, Err = pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, JobId, LocalPlayer)
+    end)
+    return Ok, tostring(Err or "")
 end
 
 --// Defaults \\--
@@ -271,6 +375,82 @@ local function MakeStat(
     ValueLabel.Size = UDim2.new(1, -20, 0, 13)
 
     return ValueLabel
+end
+
+--// Action button laid out on the stat grid (server hop / small server / join server and
+--// the privacy toggle); mirrors the music player pills while keeping the stat spacing.
+--// GetState lets toggle styled buttons keep their accent state through hover tweens \\--
+local function MakeActionButton(
+    Library,
+    Parent: GuiObject,
+    Text: string,
+    IconName: string,
+    X: number,
+    Y: number,
+    W: number,
+    GetState
+): (TextButton, GuiObject, TextLabel)
+    local Button = Instance.new("TextButton")
+    Button.BackgroundColor3 = Library.Scheme.BackgroundColor
+    Button.BackgroundTransparency = 0.25
+    Button.BorderSizePixel = 0
+    Button.AutoButtonColor = false
+    Button.Text = ""
+    Button.Size = UDim2.new(W, -6, 0, 42)
+    Button.Position = UDim2.new(X, 3, 0, Y)
+    Button.ClipsDescendants = true
+    Button.Parent = Parent
+
+    Library:AddToRegistry(Button, { BackgroundColor3 = "BackgroundColor" })
+    MakeCorner(Library, Button, 4)
+
+    local Inner = Instance.new("Frame")
+    Inner.AnchorPoint = Vector2.new(0.5, 0.5)
+    Inner.BackgroundTransparency = 1
+    Inner.BorderSizePixel = 0
+    Inner.Position = UDim2.fromScale(0.5, 0.5)
+    Inner.Size = UDim2.new(1, -24, 1, 0)
+    Inner.Parent = Button
+
+    local InnerLayout = Instance.new("UIListLayout")
+    InnerLayout.FillDirection = Enum.FillDirection.Horizontal
+    InnerLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    InnerLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    InnerLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    InnerLayout.Padding = UDim.new(0, 6)
+    InnerLayout.Parent = Inner
+
+    --// Accent icon makes the pill read as an action button \\--
+    local Icon = MakeIcon(Library, Button, IconName, 15, "AccentColor")
+    Icon.Parent = Inner
+    Icon.LayoutOrder = 1
+
+    local Label = MakeText(Library, Button, Text, 11, true, 0.25)
+    Label.Parent = Inner
+    Label.LayoutOrder = 2
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+
+    --// Measure the label so it hugs its text, a scale-sized label stretches to the
+    --// full pill width and pushes the icon out of the button (clipped, off-center) \\--
+    local TextWidth = select(1, Library:GetTextBounds(Text, Library.Scheme.Font, 11))
+    Label.Size = UDim2.new(0, math.max(24, TextWidth + 2), 0, 17)
+
+    Button.MouseEnter:Connect(function()
+        local HoverTarget = 0.1
+        if GetState and GetState() then
+            HoverTarget = 0
+        end
+        TweenService:Create(Button, Library.TweenInfo, { BackgroundTransparency = HoverTarget }):Play()
+    end)
+    Button.MouseLeave:Connect(function()
+        local RestTarget = 0.25
+        if GetState and GetState() then
+            RestTarget = 0.1
+        end
+        TweenService:Create(Button, Library.TweenInfo, { BackgroundTransparency = RestTarget }):Play()
+    end)
+
+    return Button, Icon, Label
 end
 
 --// Segment page with description entries (Title / Date / Content) \\--
@@ -1960,6 +2140,17 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
 
     Config = Library:Validate(Config or {}, Defaults)
 
+    --// Small notify wrapper so the new server / privacy features stay tidy \\--
+    local function NotifyCard(Title: string, Description: string, Time: number?)
+        if Library and Library.Notify then
+            Library:Notify({
+                Title = Title,
+                Description = Description,
+                Time = Time or 4,
+            })
+        end
+    end
+
     local Window = Tab.Window
     local DiscordInviteCode = ExtractDiscordInviteCode(Config.DiscordInvite)
 
@@ -2070,6 +2261,82 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
     Username.Position = UDim2.fromOffset(82, 42)
     Username.Size = UDim2.new(1, -98, 0, 18)
 
+    --// Identity privacy (hide username & display name): masks the profile texts and the
+    --// name above your own character for the local view only \\--
+    local IdentityHidden = false
+    local IdentityMask = "*******"
+    local SavedDisplayDistance: any = nil
+    local CharacterWatchConnection: any = nil
+
+    local function RefreshIdentityTexts()
+        local DisplayNameText = tostring(LocalPlayer.DisplayName)
+        local AccountNameText = tostring(LocalPlayer.Name)
+
+        if IdentityHidden then
+            DisplayNameText = IdentityMask
+            AccountNameText = IdentityMask
+        end
+
+        SetText(Welcome, "Hello, " .. DisplayNameText)
+        SetText(Username, GetGreeting(Config.Greetings) .. " | @" .. AccountNameText)
+    end
+
+    local function ApplyCharacterPrivacy(Character: any)
+        if not IdentityHidden then
+            return
+        end
+
+        task.spawn(function()
+            pcall(function()
+                local Humanoid = Character:WaitForChild("Humanoid", 10)
+                if Humanoid and IdentityHidden then
+                    if SavedDisplayDistance == nil then
+                        SavedDisplayDistance = Humanoid.DisplayDistanceType
+                    end
+                    Humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+                end
+            end)
+        end)
+    end
+
+    local function SetIdentityHidden(Hidden: boolean, Silent: boolean?)
+        IdentityHidden = Hidden
+        RefreshIdentityTexts()
+
+        if Hidden then
+            if LocalPlayer.Character then
+                ApplyCharacterPrivacy(LocalPlayer.Character)
+            end
+
+            if not CharacterWatchConnection then
+                CharacterWatchConnection = LocalPlayer.CharacterAdded:Connect(ApplyCharacterPrivacy)
+            end
+
+            if not Silent then
+                NotifyCard("Privacy", "Username & display name are hidden locally.")
+            end
+        else
+            if CharacterWatchConnection then
+                CharacterWatchConnection:Disconnect()
+                CharacterWatchConnection = nil
+            end
+
+            pcall(function()
+                local Humanoid = LocalPlayer.Character
+                    and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+                if Humanoid then
+                    Humanoid.DisplayDistanceType = SavedDisplayDistance
+                        or Enum.HumanoidDisplayDistanceType.Viewer
+                end
+            end)
+            SavedDisplayDistance = nil
+
+            if not Silent then
+                NotifyCard("Privacy", "Username & display name are visible again.")
+            end
+        end
+    end
+
     --// Segments bar \\--
     local Segments = MakePanel(Library, Root, UDim2.new(1, 0, 0, 48))
     Segments.LayoutOrder = 2
@@ -2161,7 +2428,10 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
 
     --// Pages + segment buttons \\--
     local CardGap = 10
-    local ContentHeight = 154 + CardGap + 112 --// tallest column: server + discord cards
+    --// tallest columns: left = server (job id + hop + join rows) + discord cards,
+    --// right = executor + friends + privacy cards
+    local ContentHeight = 296 + CardGap + 112
+    ContentHeight = math.max(ContentHeight, 104 + CardGap + 154 + CardGap + 154)
     if ShowMusicSegment then
         --// music page: now playing (178) + audio (122) / add music (126) + playlist (174) cards
         ContentHeight = math.max(ContentHeight, 178 + CardGap + 122)
@@ -2278,10 +2548,65 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
     local StatLabels = {}
     local FriendLabels = {}
     local DiscordLabels = {}
+    local PrivacyLabels = {}
+
+    --// Server hop: pulls the public server list and teleports into another instance.
+    --// Smallest = true targets the least populated server instead of a random one \\--
+    local HopBusy = false
+    local function HopServer(Smallest: boolean)
+        if HopBusy then
+            return
+        end
+        HopBusy = true
+
+        task.spawn(function()
+            local Servers = FetchPublicServers(Smallest and 3 or 2)
+            if #Servers == 0 then
+                NotifyCard("Server Hop", "No other joinable public servers were found for this game.")
+                HopBusy = false
+                return
+            end
+
+            if Smallest then
+                table.sort(Servers, function(A, B)
+                    return (tonumber(A.playing) or 0) < (tonumber(B.playing) or 0)
+                end)
+            else
+                for Index = #Servers, 2, -1 do
+                    local SwapIndex = math.random(Index)
+                    Servers[Index], Servers[SwapIndex] = Servers[SwapIndex], Servers[Index]
+                end
+            end
+
+            --// A few candidates are tried in order in case a teleport call is rejected \\--
+            local LastError = "unknown error"
+            for Attempt = 1, math.min(#Servers, 4) do
+                local Target = Servers[Attempt]
+                local Ok, Err = TeleportToJobId(Target.id)
+                if Ok then
+                    local PlayerCount = tonumber(Target.playing) or 0
+                    local Message = Smallest
+                        and ("Joining the smallest server (%d players)."):format(PlayerCount)
+                        or ("Joining a server with %d players."):format(PlayerCount)
+                    NotifyCard("Teleporting", Message, 5)
+
+                    task.delay(8, function()
+                        HopBusy = false
+                    end)
+                    return
+                end
+                LastError = Err
+            end
+
+            NotifyCard("Server Hop", "Teleport failed: " .. LastError, 6)
+            HopBusy = false
+        end)
+    end
 
     do
-        --// Server card \\--
-        local ServerCard = MakePanel(Library, LeftColumn, UDim2.new(1, 0, 0, 154))
+        --// Server card: live stats, a tap-to-copy job id, server hop / small server
+        --// buttons and the join-by-job-id row \\--
+        local ServerCard = MakePanel(Library, LeftColumn, UDim2.new(1, 0, 0, 296))
         ServerCard.LayoutOrder = 1
 
         local ServerTitle = MakeText(Library, ServerCard, "Server", 15, true, 0)
@@ -2299,6 +2624,138 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
         StatLabels.FPS = MakeStat(Library, ServerCard, "FPS", "...", 0.25, 104, 0.25)
         StatLabels.Region = MakeStat(Library, ServerCard, "Server Region", "...", 0.5, 104, 0.25)
         StatLabels.Runtime = MakeStat(Library, ServerCard, "In server for", "0s", 0.75, 104, 0.25)
+
+        --// Job id row: styled like a stat box, tap to copy the current server's job id \\--
+        local CurrentJobId = GetCurrentJobId()
+
+        local JobIdButton = Instance.new("TextButton")
+        JobIdButton.BackgroundColor3 = Library.Scheme.BackgroundColor
+        JobIdButton.BackgroundTransparency = 0.25
+        JobIdButton.BorderSizePixel = 0
+        JobIdButton.AutoButtonColor = false
+        JobIdButton.Text = ""
+        JobIdButton.Size = UDim2.new(1, -6, 0, 42)
+        JobIdButton.Position = UDim2.new(0, 3, 0, 150)
+        JobIdButton.ClipsDescendants = true
+        JobIdButton.Parent = ServerCard
+
+        Library:AddToRegistry(JobIdButton, { BackgroundColor3 = "BackgroundColor" })
+        MakeCorner(Library, JobIdButton, 4)
+
+        local JobIdTitle = MakeText(Library, JobIdButton, "Job ID (tap to copy)", 10, true, 0.13)
+        JobIdTitle.Position = UDim2.fromOffset(10, 7)
+        JobIdTitle.Size = UDim2.new(1, -34, 0, 13)
+
+        local JobIdValue = MakeText(Library, JobIdButton, CurrentJobId ~= "" and CurrentJobId or "N/A", 10, false, 0.35)
+        JobIdValue.Position = UDim2.fromOffset(10, 21)
+        JobIdValue.Size = UDim2.new(1, -34, 0, 13)
+
+        local JobIdCopyIcon = MakeIcon(Library, JobIdButton, "copy", 13, "AccentColor")
+        JobIdCopyIcon.AnchorPoint = Vector2.new(1, 0.5)
+        JobIdCopyIcon.Position = UDim2.new(1, -10, 0.5, 0)
+
+        JobIdButton.MouseEnter:Connect(function()
+            TweenService:Create(JobIdButton, Library.TweenInfo, { BackgroundTransparency = 0.1 }):Play()
+        end)
+        JobIdButton.MouseLeave:Connect(function()
+            TweenService:Create(JobIdButton, Library.TweenInfo, { BackgroundTransparency = 0.25 }):Play()
+        end)
+
+        JobIdButton.MouseButton1Click:Connect(function()
+            if CurrentJobId == "" then
+                NotifyCard("Job ID", "This session has no Job ID (Roblox Studio or a local server).")
+                return
+            end
+
+            if CopyToClipboard(CurrentJobId) then
+                NotifyCard("Copied Job ID", CurrentJobId, 6)
+            else
+                NotifyCard("Job ID", "Your executor does not expose a clipboard function.")
+            end
+        end)
+
+        --// Server hop + small server buttons \\--
+        local HopButton = MakeActionButton(Library, ServerCard, "Server Hop", "shuffle", 0, 196, 0.5)
+        local SmallButton = MakeActionButton(Library, ServerCard, "Small Server", "users", 0.5, 196, 0.5)
+
+        HopButton.MouseButton1Click:Connect(function()
+            HopServer(false)
+        end)
+        SmallButton.MouseButton1Click:Connect(function()
+            HopServer(true)
+        end)
+
+        --// Join server by job id: input box + join button \\--
+        local JoinBox = Instance.new("TextBox")
+        JoinBox.BackgroundColor3 = Library.Scheme.BackgroundColor
+        JoinBox.BackgroundTransparency = 0.25
+        JoinBox.BorderSizePixel = 0
+        JoinBox.Size = UDim2.new(0.55, -6, 0, 42)
+        JoinBox.Position = UDim2.new(0, 3, 0, 242)
+        JoinBox.Text = ""
+        JoinBox.PlaceholderText = "Paste Job ID or link"
+        JoinBox.TextSize = 10
+        JoinBox.TextXAlignment = Enum.TextXAlignment.Left
+        JoinBox.ClearTextOnFocus = false
+        JoinBox.ClipsDescendants = true
+        JoinBox.Parent = ServerCard
+
+        Library:AddToRegistry(JoinBox, { TextColor3 = "FontColor", FontFace = "Font" })
+        JoinBox.TextColor3 = Library.Scheme.FontColor
+        JoinBox.FontFace = Library.Scheme.Font
+        MakeCorner(Library, JoinBox, 4)
+
+        local JoinStroke = MakeStroke(Library, JoinBox)
+
+        local JoinPadding = Instance.new("UIPadding")
+        JoinPadding.PaddingLeft = UDim.new(0, 10)
+        JoinPadding.PaddingRight = UDim.new(0, 10)
+        JoinPadding.Parent = JoinBox
+
+        local JoinButton = MakeActionButton(Library, ServerCard, "Join Server", "log-in", 0.55, 242, 0.45)
+
+        local JoinBusy = false
+        local function DoJoinServer()
+            if JoinBusy then
+                return
+            end
+
+            local JobId = ExtractJobId(JoinBox.Text)
+            if not JobId then
+                NotifyCard("Join Server", "Paste a Job ID or a roblox.com server link first.")
+                return
+            end
+
+            JoinBusy = true
+            local Ok, Err = TeleportToJobId(JobId)
+            if Ok then
+                NotifyCard("Teleporting", "Joining server " .. JobId, 5)
+
+                task.delay(8, function()
+                    JoinBusy = false
+                end)
+            else
+                NotifyCard("Join Server", "Teleport failed: " .. Err, 6)
+                JoinBusy = false
+            end
+        end
+
+        JoinButton.MouseButton1Click:Connect(DoJoinServer)
+        JoinBox.Focused:Connect(function()
+            JoinStroke.Color = Library.Scheme.AccentColor
+            if Library.Registry[JoinStroke] then
+                Library.Registry[JoinStroke].Color = "AccentColor"
+            end
+        end)
+        JoinBox.FocusLost:Connect(function(EnterPressed: boolean)
+            JoinStroke.Color = Library.Scheme.OutlineColor
+            if Library.Registry[JoinStroke] then
+                Library.Registry[JoinStroke].Color = "OutlineColor"
+            end
+            if EnterPressed then
+                DoJoinServer()
+            end
+        end)
     end
 
     do
@@ -2369,14 +2826,7 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
             end
 
             local Link = "https://discord.gg/" .. DiscordInviteCode
-
-            if setclipboard then
-                setclipboard(Link)
-            elseif toclipboard then
-                toclipboard(Link)
-            elseif set_clipboard then
-                set_clipboard(Link)
-            end
+            CopyToClipboard(Link)
 
             if Library.Notify then
                 Library:Notify({
@@ -2481,6 +2931,76 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
         FriendLabels.Offline = MakeStat(Library, FriendsCard, "Offline", "...", 0.5, 58, 0.5)
         FriendLabels.Online = MakeStat(Library, FriendsCard, "Online", "...", 0, 104, 0.5)
         FriendLabels.All = MakeStat(Library, FriendsCard, "All", "...", 0.5, 104, 0.5)
+    end
+
+    do
+        --// Privacy card (hide username & display name) \\--
+        local PrivacyCard = MakePanel(Library, RightColumn, UDim2.new(1, 0, 0, 154))
+        PrivacyCard.LayoutOrder = 3
+
+        local PrivacyTitle = MakeText(Library, PrivacyCard, "Privacy", 16, true, 0)
+        PrivacyTitle.Position = UDim2.fromOffset(14, 12)
+        PrivacyTitle.Size = UDim2.new(1, -28, 0, 20)
+
+        local PrivacySub =
+            MakeText(Library, PrivacyCard, "Hide username & display name locally", 10, false, 0.45)
+        PrivacySub.Position = UDim2.fromOffset(14, 32)
+        PrivacySub.Size = UDim2.new(1, -28, 0, 14)
+
+        local HideButton, HideIcon, HideLabel = MakeActionButton(
+            Library,
+            PrivacyCard,
+            "Hide Username & Name",
+            "eye-off",
+            0,
+            58,
+            1,
+            function()
+                return IdentityHidden
+            end
+        )
+
+        --// Status dot on the right edge of the toggle: dim while visible, lit while hidden \\--
+        local HideDot = Instance.new("Frame")
+        HideDot.BackgroundColor3 = Library.Scheme.OutlineColor
+        HideDot.BorderSizePixel = 0
+        HideDot.AnchorPoint = Vector2.new(1, 0.5)
+        HideDot.Position = UDim2.new(1, -9, 0.5, 0)
+        HideDot.Size = UDim2.fromOffset(5, 5)
+        HideDot.Parent = HideButton
+
+        Library:AddToRegistry(HideDot, { BackgroundColor3 = "OutlineColor" })
+        local HideDotCorner = Instance.new("UICorner")
+        HideDotCorner.CornerRadius = UDim.new(1, 0)
+        HideDotCorner.Parent = HideDot
+
+        PrivacyLabels.Status = MakeStat(Library, PrivacyCard, "Identity", "Visible", 0, 104, 1)
+
+        local function SetPrivacyVisual(Hidden: boolean)
+            HideButton.BackgroundColor3 = Hidden and Library.Scheme.AccentColor
+                or Library.Scheme.BackgroundColor
+            HideButton.BackgroundTransparency = Hidden and 0.1 or 0.25
+
+            if Library.Registry[HideButton] then
+                Library.Registry[HideButton].BackgroundColor3 = Hidden and "AccentColor" or "BackgroundColor"
+            end
+
+            SetIconColorScheme(Library, HideIcon, Hidden and "WhiteColor" or "AccentColor")
+            SetLabelScheme(Library, HideLabel, Hidden and "WhiteColor" or "FontColor")
+            HideLabel.TextTransparency = Hidden and 0 or 0.25
+
+            HideDot.BackgroundColor3 = Hidden and Library.Scheme.WhiteColor or Library.Scheme.OutlineColor
+            if Library.Registry[HideDot] then
+                Library.Registry[HideDot].BackgroundColor3 = Hidden and "WhiteColor" or "OutlineColor"
+            end
+
+            SetText(PrivacyLabels.Status, Hidden and "Hidden" or "Visible")
+        end
+
+        HideButton.MouseButton1Click:Connect(function()
+            SetIdentityHidden(not IdentityHidden)
+            SetPrivacyVisual(IdentityHidden)
+        end)
     end
 
     --// Custom segment pages (mirroring the modern UI segments: Script, UI, Changelog, ...) \\--
@@ -2619,8 +3139,14 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
             Ping = tostring(math.floor((LocalPlayer:GetNetworkPing() * 1000) + 0.5)) .. "ms"
         end)
 
-        SetText(Welcome, "Hello, " .. tostring(LocalPlayer.DisplayName))
-        SetText(Username, GetGreeting(Config.Greetings) .. " | @" .. tostring(LocalPlayer.Name))
+        local DisplayNameText = tostring(LocalPlayer.DisplayName)
+        local AccountNameText = tostring(LocalPlayer.Name)
+        if IdentityHidden then
+            DisplayNameText = IdentityMask
+            AccountNameText = IdentityMask
+        end
+        SetText(Welcome, "Hello, " .. DisplayNameText)
+        SetText(Username, GetGreeting(Config.Greetings) .. " | @" .. AccountNameText)
         SetText(StatLabels.Players, tostring(#Players:GetPlayers()) .. " playing")
         SetText(StatLabels.Capacity, tostring(Players.MaxPlayers) .. " can join")
         SetText(StatLabels.Latency, Ping)
@@ -2650,6 +3176,10 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
         ActivePage = "Details",
         Connections = { RenderConnection },
         Music = MusicPlayer,
+        --// Dashboard:HopServer(Smallest) hops to a random (or the least populated) server
+        HopServer = HopServer,
+        --// Dashboard:HideIdentity(Hidden) hides the username & display name locally
+        HideIdentity = SetIdentityHidden,
     }
 
     function Dashboard:SelectPage(PageName: string)
@@ -2662,6 +3192,11 @@ function DashboardManager:CreateDashboard(Tab: any, Config: any)
     function Dashboard:Destroy()
         if RenderConnection and RenderConnection.Connected then
             RenderConnection:Disconnect()
+        end
+
+        --// Silent identity reset so the local character keeps its name display \\--
+        if IdentityHidden then
+            SetIdentityHidden(false, true)
         end
 
         if MusicPlayer then
